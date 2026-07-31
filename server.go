@@ -6,13 +6,13 @@ import (
 )
 
 type Server struct {
-	Ip string
+	Ip   string
 	Port int
 }
 
-func NewServer(ip string, port int) *Server{
+func NewServer(ip string, port int) *Server {
 	server := &Server{
-		Ip: ip,
+		Ip:   ip,
 		Port: port,
 	}
 	return server
