@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"sync"
 )
@@ -51,6 +52,24 @@ func (this *Server) Handler(conn net.Conn) {
 	go user.ListenMassage()
 
 	this.BoradCast(user, "Online...")
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := conn.Read(buf)
+			if n == 0 {
+				this.BoradCast(user, "Offline...")
+				return
+			}
+			if err != nil && err != io.EOF {
+				fmt.Println("conn Read err: ", err)
+				return
+			}
+
+			msg := string(buf[:n-1])
+			this.BoradCast(user, msg)
+		}
+	}()
 
 	select {}
 }
