@@ -2,6 +2,7 @@ package main
 
 import (
 	"net"
+	"strings"
 )
 
 type User struct {
@@ -53,6 +54,20 @@ func (this *User) DoMassage(msg string) {
 		for _, user := range this.server.OnlineMap {
 			onlineMsg := "[" + user.Name + ":" + "Online...\n"
 			this.SendMsg(onlineMsg)
+		}
+	} else if len(msg) > 7 && msg[:7] == "rename|" {
+		newName := strings.Split(msg, "|")[1]
+		_, ok := this.server.OnlineMap[newName]
+		if ok {
+			this.SendMsg("username is alrady taken\n")
+		} else {
+			this.server.mapLock.Lock()
+			delete(this.server.OnlineMap, this.Name)
+			this.server.OnlineMap[newName] = this
+			this.server.mapLock.Unlock()
+
+			this.Name = newName
+			this.SendMsg("Username update successfully: " + this.Name + "\n")
 		}
 	} else {
 		this.server.BoradCast(this, msg)
