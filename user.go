@@ -43,8 +43,20 @@ func (this *User) Offline() {
 
 }
 
+func (this *User) SendMsg(msg string) {
+	this.conn.Write([]byte(msg))
+}
+
 func (this *User) DoMassage(msg string) {
-	this.server.BoradCast(this, msg)
+	if msg == "who" {
+		this.server.mapLock.Lock()
+		for _, user := range this.server.OnlineMap {
+			onlineMsg := "[" + user.Name + ":" + "Online...\n"
+			this.SendMsg(onlineMsg)
+		}
+	} else {
+		this.server.BoradCast(this, msg)
+	}
 }
 
 func (this *User) ListenMassage() {
