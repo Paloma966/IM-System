@@ -43,22 +43,18 @@ func (this *Server) BoradCast(user *User, msg string) {
 }
 
 func (this *Server) Handler(conn net.Conn) {
-	user := NewUser(conn)
+	user := NewUser(conn, this)
 
-	this.mapLock.Lock()
-	this.OnlineMap[user.Name] = user
-	this.mapLock.Unlock()
+	user.Online()
 
 	go user.ListenMassage()
-
-	this.BoradCast(user, "Online...")
 
 	go func() {
 		buf := make([]byte, 4096)
 		for {
 			n, err := conn.Read(buf)
 			if n == 0 {
-				this.BoradCast(user, "Offline...")
+				user.Offline()
 				return
 			}
 			if err != nil && err != io.EOF {
@@ -67,7 +63,7 @@ func (this *Server) Handler(conn net.Conn) {
 			}
 
 			msg := string(buf[:n-1])
-			this.BoradCast(user, msg)
+			user.DoMassage(msg)
 		}
 	}()
 
