@@ -48,7 +48,7 @@ func (this *User) SendMsg(msg string) {
 	this.conn.Write([]byte(msg))
 }
 
-func (this *User) DoMassage(msg string) {
+func (this *User) DoMessage(msg string) {
 	if msg == "who" {
 		this.server.mapLock.Lock()
 		for _, user := range this.server.OnlineMap {
@@ -69,12 +69,31 @@ func (this *User) DoMassage(msg string) {
 			this.Name = newName
 			this.SendMsg("Username update successfully: " + this.Name + "\n")
 		}
+	} else if len(msg) > 4 && msg[:3] == "to|" {
+		remoteName := strings.Split(msg, "|")[1]
+		if remoteName == "" {
+			this.SendMsg("Invalid message format, expected: to|userName|message \n")
+			return
+		}
+
+		remoteUser, ok := this.server.OnlineMap[remoteName]
+		if !ok {
+			this.SendMsg("User not found \n")
+			return
+		}
+
+		content := strings.Split(msg, "|")[2]
+		if content == "" {
+			this.SendMsg("Message is empty, please resend \n")
+			return
+		}
+		remoteUser.SendMsg(this.Name + "to you: " + content + "\n")
 	} else {
 		this.server.BoradCast(this, msg)
 	}
 }
 
-func (this *User) ListenMassage() {
+func (this *User) Listenmessage() {
 	for {
 		msg := <-this.C
 		this.conn.Write([]byte(msg + "\n"))

@@ -48,7 +48,7 @@ func (this *Server) Handler(conn net.Conn) {
 
 	user.Online()
 
-	go user.ListenMassage()
+	go user.Listenmessage()
 
 	isLive := make(chan bool)
 
@@ -66,7 +66,7 @@ func (this *Server) Handler(conn net.Conn) {
 			}
 
 			msg := string(buf[:n-1])
-			user.DoMassage(msg)
+			user.DoMessage(msg)
 
 			isLive <- true
 		}
@@ -75,7 +75,7 @@ func (this *Server) Handler(conn net.Conn) {
 	for {
 		select {
 		case <-isLive:
-		case <-time.After(time.Second * 10):
+		case <-time.After(time.Second * 60):
 			user.SendMsg("You have been kicked out")
 			close(user.C)
 			conn.Close()
