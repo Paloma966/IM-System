@@ -8,7 +8,7 @@ import (
 type User struct {
 	Name   string
 	Addr   string
-	C      chan string
+	MsgCh  chan string
 	conn   net.Conn
 	server *Server
 }
@@ -19,83 +19,82 @@ func NewUser(conn net.Conn, server *Server) *User {
 	user := &User{
 		Name:   userAddr,
 		Addr:   userAddr,
-		C:      make(chan string),
+		MsgCh:  make(chan string),
 		conn:   conn,
 		server: server,
 	}
 	return user
 }
 
-func (this *User) Online() {
-	this.server.mapLock.Lock()
-	this.server.OnlineMap[this.Name] = this
-	this.server.mapLock.Unlock()
+func (u *User) Online() {
+	u.server.mu.Lock()
+	u.server.Users[u.Name] = u
+	u.server.mu.Unlock()
 
-	this.server.BoradCast(this, "Online...")
-
+	u.server.Broadcast(u, "Online...")
 }
 
-func (this *User) Offline() {
-	this.server.mapLock.Lock()
-	delete(this.server.OnlineMap, this.Name)
-	this.server.mapLock.Unlock()
+func (u *User) Offline() {
+	u.server.mu.Lock()
+	delete(u.server.Users, u.Name)
+	u.server.mu.Unlock()
 
-	this.server.BoradCast(this, "Offline...")
-
+	u.server.Broadcast(u, "Offline...")
 }
 
-func (this *User) SendMsg(msg string) {
-	this.conn.Write([]byte(msg))
+func (u *User) SendMsg(msg string) {
+	u.conn.Write([]byte(msg))
 }
 
-func (this *User) DoMessage(msg string) {
+func (u *User) HandleMessage(msg string) {
 	if msg == "who" {
-		this.server.mapLock.Lock()
-		for _, user := range this.server.OnlineMap {
+		u.server.mu.Lock()
+		for _, user := range u.server.Users {
 			onlineMsg := "[" + user.Name + ":" + "Online...\n"
-			this.SendMsg(onlineMsg)
+			u.SendMsg(onlineMsg)
 		}
+		u.server.mu.Unlock()
 	} else if len(msg) > 7 && msg[:7] == "rename|" {
 		newName := strings.Split(msg, "|")[1]
-		_, ok := this.server.OnlineMap[newName]
+		_, ok := u.server.Users[newName]
 		if ok {
-			this.SendMsg("username is alrady taken\n")
+			u.SendMsg("username is already taken\n")
 		} else {
-			this.server.mapLock.Lock()
-			delete(this.server.OnlineMap, this.Name)
-			this.server.OnlineMap[newName] = this
-			this.server.mapLock.Unlock()
+			u.server.mu.Lock()
+			delete(u.server.Users, u.Name)
+			u.server.Users[newName] = u
+			u.server.mu.Unlock()
 
-			this.Name = newName
-			this.SendMsg("Username update successfully: " + this.Name + "\n")
+			u.Name = newName
+			u.SendMsg("Username updated successfully: " + u.Name + "\n")
 		}
 	} else if len(msg) > 4 && msg[:3] == "to|" {
 		remoteName := strings.Split(msg, "|")[1]
 		if remoteName == "" {
-			this.SendMsg("Invalid message format, expected: to|userName|message \n")
+			u.SendMsg("Invalid message format, expected: to|userName|message\n")
 			return
 		}
 
-		remoteUser, ok := this.server.OnlineMap[remoteName]
+		remoteUser, ok := u.server.Users[remoteName]
 		if !ok {
-			this.SendMsg("User not found \n")
+			u.SendMsg("User not found\n")
 			return
 		}
 
 		content := strings.Split(msg, "|")[2]
 		if content == "" {
-			this.SendMsg("Message is empty, please resend \n")
+			u.SendMsg("Message is empty, please resend\n")
 			return
 		}
-		remoteUser.SendMsg(this.Name + "to you: " + content + "\n")
+		remoteUser.SendMsg(u.Name + " to you: " + content + "\n")
 	} else {
-		this.server.BoradCast(this, msg)
+		u.server.Broadcast(u, msg)
 	}
 }
 
-func (this *User) Listenmessage() {
+func (u *User) ListenMessage() {
 	for {
-		msg := <-this.C
-		this.conn.Write([]byte(msg + "\n"))
+		msg := <-u.MsgCh
+		u.conn.Write([]byte(msg + "\n"))
 	}
 }

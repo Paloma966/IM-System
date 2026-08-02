@@ -9,46 +9,46 @@ import (
 )
 
 type Server struct {
-	Ip        string
-	Port      int
-	OnlineMap map[string]*User
-	mapLock   sync.RWMutex
-	Message   chan string
+	IP       string
+	Port     int
+	Users    map[string]*User
+	mu       sync.RWMutex
+	Messages chan string
 }
 
 func NewServer(ip string, port int) *Server {
 	server := &Server{
-		Ip:        ip,
-		Port:      port,
-		OnlineMap: make(map[string]*User),
-		Message:   make(chan string),
+		IP:       ip,
+		Port:     port,
+		Users:    make(map[string]*User),
+		Messages: make(chan string),
 	}
 	return server
 }
 
-func (this *Server) ListenMessager() {
+func (s *Server) HandleMessages() {
 	for {
-		msg := <-this.Message
+		msg := <-s.Messages
 
-		this.mapLock.Lock()
-		for _, cli := range this.OnlineMap {
-			cli.C <- msg
+		s.mu.Lock()
+		for _, cli := range s.Users {
+			cli.MsgCh <- msg
 		}
-		this.mapLock.Unlock()
+		s.mu.Unlock()
 	}
 }
 
-func (this *Server) BoradCast(user *User, msg string) {
+func (s *Server) Broadcast(user *User, msg string) {
 	sendMsg := "[" + user.Addr + "]" + user.Name + ": " + msg
-	this.Message <- sendMsg
+	s.Messages <- sendMsg
 }
 
-func (this *Server) Handler(conn net.Conn) {
-	user := NewUser(conn, this)
+func (s *Server) Handler(conn net.Conn) {
+	user := NewUser(conn, s)
 
 	user.Online()
 
-	go user.Listenmessage()
+	go user.ListenMessage()
 
 	isLive := make(chan bool)
 
@@ -61,12 +61,12 @@ func (this *Server) Handler(conn net.Conn) {
 				return
 			}
 			if err != nil && err != io.EOF {
-				fmt.Println("conn Read err: ", err)
+				fmt.Println("conn Read err:", err)
 				return
 			}
 
 			msg := string(buf[:n-1])
-			user.DoMessage(msg)
+			user.HandleMessage(msg)
 
 			isLive <- true
 		}
@@ -77,30 +77,30 @@ func (this *Server) Handler(conn net.Conn) {
 		case <-isLive:
 		case <-time.After(time.Second * 60):
 			user.SendMsg("You have been kicked out")
-			close(user.C)
+			close(user.MsgCh)
 			conn.Close()
 			return
 		}
 	}
 }
 
-func (this *Server) Start() {
-	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", this.Ip, this.Port))
+func (s *Server) Start() {
+	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", s.IP, s.Port))
 	if err != nil {
-		fmt.Println("net.Listen err: ", err)
+		fmt.Println("net.Listen err:", err)
 		return
 	}
 	defer listener.Close()
 
-	go this.ListenMessager()
+	go s.HandleMessages()
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			fmt.Println("listener accept err: ", err)
+			fmt.Println("listener accept err:", err)
 			continue
 		}
 
-		go this.Handler(conn)
+		go s.Handler(conn)
 	}
 }
