@@ -3,7 +3,9 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"net"
+	"os"
 )
 
 type Client struct {
@@ -30,6 +32,10 @@ func NewClient(serverIp string, serverPort int) *Client {
 	return client
 }
 
+func (client *Client) DealResponse() {
+	io.Copy(os.Stdout, client.conn)
+}
+
 func (client *Client) menu() bool {
 	var flag int
 
@@ -50,6 +56,19 @@ func (client *Client) menu() bool {
 
 }
 
+func (client *Client) UpdateName() bool {
+	fmt.Println(">>>> Please enter username:")
+	fmt.Scanln(&client.Name)
+
+	sendMsg := "rename|" + client.Name + "\n"
+	_, err := client.conn.Write([]byte(sendMsg))
+	if err != nil {
+		fmt.Println("conn.Write err: ", err)
+		return false
+	}
+	return true
+}
+
 func (client *Client) Run() {
 	for client.flag != 0 {
 		for client.menu() != true {
@@ -57,13 +76,13 @@ func (client *Client) Run() {
 		switch client.flag {
 		case 1:
 			fmt.Println("Group chat")
-			break
+
 		case 2:
 			fmt.Println("private chat")
-			break
+
 		case 3:
-			fmt.Println("Update username")
-			break
+			client.UpdateName()
+
 		}
 	}
 }
@@ -85,6 +104,9 @@ func main() {
 		fmt.Println(">>>> Failed to connected to server...")
 		return
 	}
+
+	go client.DealResponse()
+
 	fmt.Println(">>>> Connect to server...")
 
 	client.Run()
