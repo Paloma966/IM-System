@@ -11,12 +11,14 @@ type Client struct {
 	ServerPort int
 	Name       string
 	conn       net.Conn
+	flag       int
 }
 
 func NewClient(serverIp string, serverPort int) *Client {
 	client := &Client{
 		ServerIp:   serverIp,
 		ServerPort: serverPort,
+		flag:       999,
 	}
 	conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", serverIp, serverPort))
 	if err != nil {
@@ -28,6 +30,44 @@ func NewClient(serverIp string, serverPort int) *Client {
 	return client
 }
 
+func (client *Client) menu() bool {
+	var flag int
+
+	fmt.Println("1. Group chat")
+	fmt.Println("2. private chat")
+	fmt.Println("3. Update username")
+	fmt.Println("0. Exit")
+
+	fmt.Scanln(&flag)
+
+	if flag >= 0 && flag <= 3 {
+		client.flag = flag
+		return true
+	} else {
+		fmt.Println("Invalid option")
+		return false
+	}
+
+}
+
+func (client *Client) Run() {
+	for client.flag != 0 {
+		for client.menu() != true {
+		}
+		switch client.flag {
+		case 1:
+			fmt.Println("Group chat")
+			break
+		case 2:
+			fmt.Println("private chat")
+			break
+		case 3:
+			fmt.Println("Update username")
+			break
+		}
+	}
+}
+
 var serverIp string
 var serverPort int
 
@@ -37,6 +77,9 @@ func init() {
 }
 
 func main() {
+
+	flag.Parse()
+
 	client := NewClient("127.0.0.1", 8888)
 	if client == nil {
 		fmt.Println(">>>> Failed to connected to server...")
@@ -44,5 +87,5 @@ func main() {
 	}
 	fmt.Println(">>>> Connect to server...")
 
-	select {}
+	client.Run()
 }
