@@ -53,7 +53,69 @@ func (client *Client) menu() bool {
 		fmt.Println("Invalid option")
 		return false
 	}
+}
 
+func (client *Client) SelectUsers() {
+	sendMsg := "who\n"
+	_, err := client.conn.Write([]byte(sendMsg))
+	if err != nil {
+		fmt.Println("conn Write err: ", err)
+		return
+	}
+}
+
+func (client *Client) privateChat() {
+	var remoteName string
+	var chatMsg string
+	client.SelectUsers()
+
+	fmt.Println(">>>> Please enter chat content[username]")
+	fmt.Scanln(&remoteName)
+
+	for remoteName != "exit" {
+		fmt.Println(">>>> Please enter chat content")
+		fmt.Scanln(&chatMsg)
+		for chatMsg != "exit" {
+			if len(chatMsg) != 0 {
+				sendMsg := "to|" + remoteName + "|" + chatMsg + "\n\n"
+				_, err := client.conn.Write([]byte(sendMsg))
+				if err != nil {
+					fmt.Println("conn Write err: ", err)
+					break
+				}
+			}
+
+			chatMsg = ""
+			fmt.Println(">>>> Please enter chat content")
+			fmt.Scanln(&chatMsg)
+
+		}
+		client.SelectUsers()
+		fmt.Println(">>>> Please enter chat content[username]")
+		fmt.Scanln(&remoteName)
+	}
+}
+
+func (client *Client) PublicChat() {
+	var chatMsg string
+	fmt.Println(">>>> Please enter chat content")
+	fmt.Scanln(&chatMsg)
+
+	for chatMsg != "exit" {
+		if len(chatMsg) != 0 {
+			sendMsg := chatMsg + "\n"
+			_, err := client.conn.Write([]byte(sendMsg))
+			if err != nil {
+				fmt.Println("conn Write err: ", err)
+				break
+			}
+		}
+
+		chatMsg = ""
+		fmt.Println(">>>> Please enter chat content")
+		fmt.Scanln(&chatMsg)
+
+	}
 }
 
 func (client *Client) UpdateName() bool {
@@ -75,10 +137,10 @@ func (client *Client) Run() {
 		}
 		switch client.flag {
 		case 1:
-			fmt.Println("Group chat")
+			client.PublicChat()
 
 		case 2:
-			fmt.Println("private chat")
+			client.privateChat()
 
 		case 3:
 			client.UpdateName()
