@@ -1,0 +1,47 @@
+###
+GET http://localhost:8080/ping
+
+###
+GET http://localhost:8080/user/alice
+
+###
+GET http://localhost:8080/user/bob
+
+###
+GET http://localhost:8080/search?q=hello
+
+###
+POST http://localhost:8080/api/message
+Content-Type: application/json
+
+{
+  "to": "alice",
+  "text": "你好"
+}
+
+###
+POST http://localhost:8080/connect
+Content-Type: application/json
+
+{"name": "alice"}
+
+###
+POST http://localhost:8080/connect
+Content-Type: application/json
+
+{"name": "bob"}
+
+###
+GET http://localhost:8080/users
+
+###
+POST http://localhost:8080/api/messages
+Content-Type: application/json
+
+{"to": "alice", "text": "你好"}
+
+###
+GET http://localhost:8080/inbox/alice
+
+###
+GET http://localhost:8080/inbox/alice
