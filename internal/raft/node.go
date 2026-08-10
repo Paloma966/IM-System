@@ -26,8 +26,9 @@ type Node struct {
 	matchIndex     map[string]uint64
 	electionTimer  *time.Timer
 	heartbeatTimer *time.Timer
-	timerCh        chan struct{}
 	stopCh         chan struct{}
+	electionEpoch  uint64
+	votesReceived  map[string]bool
 }
 
 func NewNode(
@@ -79,10 +80,6 @@ func NewNode(
 
 		matchIndex: make(
 			map[string]uint64,
-		),
-
-		timerCh: make(
-			chan struct{},
 		),
 
 		stopCh: make(
