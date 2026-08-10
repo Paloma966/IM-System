@@ -40,8 +40,8 @@ type Config struct {
 
 	Peers []Peer
 
-	ElectionTimeout  time.Duration
-	HearbeatInterval time.Duration
+	ElectionTimeout   time.Duration
+	HeartbeatInterval time.Duration
 }
 
 // 根据id查信息
