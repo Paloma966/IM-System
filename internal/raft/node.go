@@ -14,7 +14,7 @@ type Node struct {
 	cfg            Config
 	transport      Transport
 	applyCh        chan Command
-	mu             sync.Mutex
+	mu             sync.RWMutex
 	role           Role
 	currentTerm    uint64
 	votedFor       string
@@ -94,15 +94,15 @@ func NewNode(
 }
 
 func (n *Node) Role() Role {
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	n.mu.RLock()
+	defer n.mu.RUnlock()
 
 	return n.role
 }
 
 func (n *Node) CurrentTerm() uint64 {
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	n.mu.RLock()
+	defer n.mu.RUnlock()
 
 	return n.currentTerm
 }
@@ -112,15 +112,15 @@ func (n *Node) IsLeader() bool {
 }
 
 func (n *Node) LeaderID() string {
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	n.mu.RLock()
+	defer n.mu.RUnlock()
 
 	return n.leaderID
 }
 
 func (n *Node) Log() *Log {
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	n.mu.RLock()
+	defer n.mu.RUnlock()
 
 	return n.log
 }

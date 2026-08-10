@@ -47,6 +47,9 @@ type Config struct {
 // 根据id查信息
 func (c Config) Peer(id string) (Peer, bool) {
 	for _, peer := range c.Peers {
+		if peer.ID == c.ID {
+			continue
+		}
 		if peer.ID == id {
 			return peer, true
 		}

@@ -104,6 +104,10 @@ func (l *Log) SliceFrom(index uint64) []LogEntry {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
+	if index >= uint64(len(l.entries)) {
+		return []LogEntry{}
+	}
+
 	return append([]LogEntry(nil), l.entries[index:]...)
 }
 
