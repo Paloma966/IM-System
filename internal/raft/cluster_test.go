@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -92,6 +93,63 @@ func TestElectionCluster(t *testing.T) {
 			t.Fatalf("leader %s lost leadership during stability window", leader.cfg.ID)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestBurstReplication 连续快速提交 10 条命令：
+// 1) 所有节点日志最终都包含全部 10 条（并发 sendAppendEntries 不回退游标）
+// 2) 所有节点日志都落盘（回归：follower 端曾不调用 SaveLog）
+func TestBurstReplication(t *testing.T) {
+	nodes := newTestCluster(t)
+	leader := waitForLeader(t, nodes)
+
+	const total = 10
+	for i := 1; i <= total; i++ {
+		cmd := Command{Type: "message", Payload: fmt.Appendf([]byte(`{"seq":`), "%d}", i)}
+		if err := leader.Submit(cmd); err != nil {
+			t.Fatalf("Submit #%d: %v", i, err)
+		}
+	}
+
+	// 所有节点日志都追到 total
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		allCaught := true
+		for _, n := range nodes {
+			if n.Log().LastIndex() < total {
+				allCaught = false
+			}
+		}
+		if allCaught {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("not all nodes replicated %d entries", total)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// follower 也必须把日志落盘（Fix 1：handleAppendEntries 后 SaveLog）
+	for id, n := range nodes {
+		loaded, err := LoadLog(n.cfg.DataDir)
+		if err != nil {
+			t.Fatalf("LoadLog(%s): %v", id, err)
+		}
+		if loaded.LastIndex() < total {
+			t.Fatalf("node %s persisted log has %d entries, want %d", id, loaded.LastIndex(), total)
+		}
+	}
+
+	// leader 的 applyCh 必须收到全部 total 条
+	seen := make(map[string]bool)
+	applied := time.Now().Add(5 * time.Second)
+	for len(seen) < total {
+		select {
+		case cmd := <-leader.applyCh:
+			seen[string(cmd.Payload)] = true
+		case <-time.After(time.Until(applied)):
+			t.Fatalf("leader applied %d/%d commands", len(seen), total)
+		}
 	}
 }
 

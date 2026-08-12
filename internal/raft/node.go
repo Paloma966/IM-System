@@ -143,10 +143,37 @@ func (n *Node) Submit(command Command) error {
 		Command: command,
 	})
 	_ = SaveLog(n.cfg.DataDir, n.log)
+
+	// 立刻尝试推进 commitIndex：单节点自己就过半，直接提交；
+	// 多节点 count=1 不过半，等 peer 确认（sendAppendEntries 再推进）。
+	n.advanceCommitIndexLocked()
 	n.mu.Unlock()
 
 	// 立即推一轮，不用等下一个心跳周期
 	go n.broadcastAppendEntries()
 
 	return nil
+}
+
+// ApplyCh 返回已提交命令的通道（状态机消费它）
+func (n *Node) ApplyCh() <-chan Command {
+	return n.applyCh
+}
+
+// LeaderHTTPAddr 当前 leader 的 HTTP 地址（follower 转发写请求用）
+func (n *Node) LeaderHTTPAddr() string {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	if n.leaderID == "" {
+		return ""
+	}
+	if n.leaderID == n.cfg.ID {
+		return n.cfg.HTTPAddr
+	}
+	p, ok := n.cfg.Peer(n.leaderID)
+	if !ok {
+		return ""
+	}
+	return p.HTTPAddr
 }

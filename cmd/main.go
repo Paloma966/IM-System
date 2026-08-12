@@ -1,35 +1,102 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"log"
 	"net/http"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"IMSystem/internal/chat"
+	"IMSystem/internal/raft"
 )
 
-type Message struct {
-	From string `json:"from"`
-	To   string `json:"to"`
-	Text string `json:"text"`
-}
-
-type SSEEvent struct {
-	From string `json:"from"`
-	To   string `json:"to"`
-	Text string `json:"text"`
-}
-
+// ConnectRequest 连接（登录）请求
 type ConnectRequest struct {
 	Name string `json:"name"`
 }
 
-var users = make(map[string]bool)
-var inboxs = make(map[string][]string)
-var mu sync.RWMutex
-var subscribers = make(map[string]chan string)
+// users 在线用户集合；subscribers 是每个用户的 SSE 推送通道。
+// 这两个是"本节点本地"的状态（在线列表不做 Raft 复制，聊天内容才复制）。
+var (
+	users       = make(map[string]bool)
+	subscribers = make(map[string]chan string)
+	mu          sync.RWMutex
+)
 
 func main() {
+	id := flag.String("id", "node-1", "node id")
+	httpAddr := flag.String("http", ":8001", "http addr for browser")
+	raftAddr := flag.String("raft", ":9001", "raft rpc addr")
+	peersStr := flag.String("peers", "", "comma-separated peers: id:raftAddr:httpAddr")
+	dataDir := flag.String("data", "", "data dir (default ./data/<id>)")
+	flag.Parse()
+
+	// 解析 peers: "node-2:9002:8002,node-3:9003:8003" → []raft.Peer
+	var peers []raft.Peer
+	for s := range strings.SplitSeq(*peersStr, ",") {
+		if s == "" {
+			continue
+		}
+		parts := strings.Split(s, ":")
+		if len(parts) != 3 {
+			log.Fatalf("bad peer %q (want id:raftAddr:httpAddr)", s)
+		}
+		peers = append(peers, raft.Peer{
+			ID:       parts[0],
+			RaftAddr: ":" + parts[1],
+			HTTPAddr: ":" + parts[2],
+		})
+	}
+
+	data := *dataDir
+	if data == "" {
+		data = "./data/" + *id
+	}
+
+	cfg := raft.Config{
+		ID:                *id,
+		HTTPAddr:          *httpAddr,
+		RaftAddr:          *raftAddr,
+		DataDir:           data,
+		Peers:             peers,
+		ElectionTimeout:   300 * time.Millisecond,
+		HeartbeatInterval: 50 * time.Millisecond,
+	}
+
+	node := raft.NewNode(cfg, raft.NewHTTPTransport())
+	node.Start()
+	defer node.Stop()
+
+	// 状态机：消费 applyCh（已提交命令），应用后推给本节点的 SSE 订阅者
+	state := chat.NewState()
+	go func() {
+		for cmd := range node.ApplyCh() {
+			if err := state.Apply(cmd); err != nil {
+				log.Println("apply:", err)
+				continue
+			}
+			hist := state.History()
+			if len(hist) > 0 {
+				pushLocal(hist[len(hist)-1]) // 推最新这条给相关 SSE 连接
+			}
+		}
+	}()
+
+	// Raft RPC server：节点间通信端口（/raft/vote、/raft/append）
+	raftSrv := raft.NewRaftHTTPServer(node)
+	go func() {
+		log.Printf("raft rpc listening on %s", *raftAddr)
+		log.Fatal(raftSrv.ListenAndServe())
+	}()
+
 	r := gin.Default()
 
 	r.Use(func(c *gin.Context) {
@@ -56,58 +123,46 @@ func main() {
 		c.File("./web/dist/index.html")
 	})
 
-	r.GET("/user/:name", func(c *gin.Context) {
-		name := c.Param("name")
-		c.JSON(http.StatusOK, gin.H{"user": name})
-	})
-
-	r.GET("/search", func(c *gin.Context) {
-		q := c.Query("q")
-		c.JSON(http.StatusOK, gin.H{"query": q})
-	})
-
+	// POST /api/messages 发消息：Leader 直接提交到 Raft 日志，Follower 转发给 Leader
 	r.POST("/api/messages", func(c *gin.Context) {
-		var msg Message
-		if err := c.ShouldBindJSON(&msg); err != nil {
+		var req chat.Message
+		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 
-		mu.RLock()
-		defer mu.RUnlock()
+		// 服务端补全 ID 和时间戳（单点生成，避免客户端伪造重复 ID）
+		msg := chat.Message{
+			ID:   fmt.Sprintf("%d", time.Now().UnixNano()),
+			From: req.From,
+			To:   req.To,
+			Text: req.Text,
+			Ts:   time.Now().Unix(),
+		}
 
-		event := SSEEvent{From: msg.From, To: msg.To, Text: msg.Text}
-		data, _ := json.Marshal(event)
-
-		if msg.To == "" || msg.To == "all" {
-			for name, ch := range subscribers {
-				select {
-				case ch <- string(data):
-				default:
-				}
-				_ = name
+		if node.IsLeader() {
+			payload, _ := json.Marshal(msg)
+			cmd := raft.Command{Type: "message", Payload: payload}
+			if err := node.Submit(cmd); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
 			}
 			c.JSON(http.StatusOK, gin.H{"ok": true})
 			return
 		}
 
-		if ch, ok := subscribers[msg.To]; ok {
-			select {
-			case ch <- string(data):
-			default:
-			}
+		// 不是 Leader → 转发给 Leader 的 HTTP 接口
+		leader := node.LeaderHTTPAddr()
+		if leader == "" {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no leader known yet, retry later"})
+			return
 		}
+		forwardToLeader(c, req, leader)
+	})
 
-		if msg.From != msg.To {
-			if ch, ok := subscribers[msg.From]; ok {
-				select {
-				case ch <- string(data):
-				default:
-				}
-			}
-		}
-
-		c.JSON(http.StatusOK, gin.H{"ok": true})
+	// GET /api/messages/history 返回状态机历史（任何节点都一致）
+	r.GET("/api/messages/history", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"messages": state.History()})
 	})
 
 	r.POST("/connect", func(c *gin.Context) {
@@ -134,20 +189,6 @@ func main() {
 			list = append(list, name)
 		}
 		c.JSON(http.StatusOK, gin.H{"users": list})
-	})
-
-	r.GET("/inbox/:name", func(c *gin.Context) {
-		name := c.Param("name")
-
-		mu.Lock()
-		defer mu.Unlock()
-		msgs := inboxs[name]
-		inboxs[name] = nil
-
-		if msgs == nil {
-			msgs = []string{}
-		}
-		c.JSON(http.StatusOK, gin.H{"message": msgs})
 	})
 
 	r.GET("/stream/:name", func(c *gin.Context) {
@@ -180,5 +221,56 @@ func main() {
 		}
 	})
 
-	r.Run()
+	log.Printf("http listening on %s", *httpAddr)
+	if err := r.Run(*httpAddr); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// pushLocal 把一条已提交的消息推给本节点上相关的 SSE 订阅者。
+// 数据来源是状态机（不是请求），所以任意节点被浏览器连上都行。
+func pushLocal(msg chat.Message) {
+	data, _ := json.Marshal(msg)
+
+	mu.RLock()
+	defer mu.RUnlock()
+
+	// 群聊：推给所有在线用户
+	if msg.To == "" || msg.To == "all" {
+		for _, ch := range subscribers {
+			select {
+			case ch <- string(data):
+			default:
+			}
+		}
+		return
+	}
+
+	// 私聊：推给发送方和接收方
+	for _, name := range []string{msg.From, msg.To} {
+		if ch, ok := subscribers[name]; ok {
+			select {
+			case ch <- string(data):
+			default:
+			}
+		}
+	}
+}
+
+// forwardToLeader 把消息转发给 Leader 的 HTTP 接口（Follower 上的写请求）
+func forwardToLeader(c *gin.Context, msg chat.Message, leader string) {
+	data, _ := json.Marshal(msg)
+	resp, err := http.Post(
+		"http://"+leader+"/api/messages",
+		"application/json",
+		bytes.NewReader(data),
+	)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to reach leader: " + err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	c.Data(resp.StatusCode, "application/json", body)
 }

@@ -43,6 +43,9 @@ func (n *Node) handleAppendEntries(req AppendEntriesRequest) AppendEntriesRespon
 	newEntries = newEntries[i:]
 	n.log.AppendRange(newEntries)
 
+	// 持久化：follower 也要落盘，否则重启后日志全丢（leader 在 Submit 里存）
+	_ = SaveLog(n.cfg.DataDir, n.log)
+
 	// 规则 6：推进 commitIndex（不超过我日志实际有的位置）
 	if req.LeaderCommit > n.commitIndex {
 		// 不超过自己日志实际有的位置
@@ -57,7 +60,8 @@ func (n *Node) handleAppendEntries(req AppendEntriesRequest) AppendEntriesRespon
 	return AppendEntriesResponse{Term: n.currentTerm, Success: true}
 }
 
-// broadcastAppendEntries Leader 发一轮心跳/日志复制（给所有 Peer）
+// broadcastAppendEntries Leader 发一轮心跳/日志复制（给所有 Peer）。
+// 每个 Peer 一个 goroutine：一个 peer 挂掉不阻塞其他 peer（HTTP 场景很重要）。
 func (n *Node) broadcastAppendEntries() {
 	n.mu.Lock()
 	if n.role != Leader {
@@ -68,7 +72,7 @@ func (n *Node) broadcastAppendEntries() {
 	n.mu.Unlock()
 
 	for _, peer := range peers {
-		n.sendAppendEntries(peer)
+		go n.sendAppendEntries(peer)
 	}
 }
 
@@ -128,11 +132,16 @@ func (n *Node) sendAppendEntries(peer Peer) {
 	}
 
 	if resp.Success {
-		// 游标前进
+		// 游标前进。用 max 防止乱序响应回退进度：
+		// 多个并发 sendAppendEntries 打到同一 peer，旧请求的响应可能后到，
+		// 无条件覆盖会把已确认的 matchIndex 打回去（重新复制、拖慢提交）。
+		// Success 意味着 peer 确实追加到了 matched，所以只前进是安全的。
 		matched := prevLogIndex + uint64(len(req.Entries))
-		n.nextIndex[peer.ID] = matched + 1
-		n.matchIndex[peer.ID] = matched
-		n.advanceCommitIndexLocked() // 每确认一个 peer 就检查是否过半可提交
+		if matched > n.matchIndex[peer.ID] {
+			n.matchIndex[peer.ID] = matched
+			n.nextIndex[peer.ID] = matched + 1
+			n.advanceCommitIndexLocked() // 每确认一个 peer 就检查是否过半可提交
+		}
 	} else {
 		// 一致性检查没过 → 回退一格，下个周期重试
 		if n.nextIndex[peer.ID] > 1 {
