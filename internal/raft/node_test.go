@@ -11,7 +11,7 @@ func newTestNode(t *testing.T, id string) *Node {
 		ID:                id,
 		HTTPAddr:          ":8000",
 		RaftAddr:          ":9000",
-		DataDir:           "/tmp/raft-test-" + id,
+		DataDir:           t.TempDir(),
 		ElectionTimeout:   200 * time.Millisecond,
 		HeartbeatInterval: 20 * time.Millisecond,
 	}

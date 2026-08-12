@@ -109,6 +109,9 @@ func (n *Node) scheduleElectionTimer() {
 
 		n.mu.Lock()
 		n.checkMajorityLocked()
+		if n.role == Follower || n.role == Candidate {
+			n.scheduleElectionTimer()
+		}
 		n.mu.Unlock()
 	})
 }
@@ -176,7 +179,7 @@ func (n *Node) becomeLeaderLocked() {
 		n.matchIndex[peer.ID] = 0
 	}
 
-	go n.broadcastAppendEntries()
+	go n.runHeartbeatLoop()
 }
 
 // ============================================================
@@ -188,9 +191,13 @@ func (n *Node) Start() {
 	n.role = Follower
 	n.mu.Unlock()
 	go n.runElectionTimer()
+	go n.runApplyLoop()
 }
 
 func (n *Node) Stop() {
+	n.mu.Lock()
+	n.role = Follower // 让 broadcastAppendEntries 循环看到 role!=Leader 自己退出
+	n.mu.Unlock()
 	close(n.stopCh)
 	if n.electionTimer != nil {
 		n.electionTimer.Stop()

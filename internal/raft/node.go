@@ -29,6 +29,7 @@ type Node struct {
 	stopCh         chan struct{}
 	electionEpoch  uint64
 	votesReceived  map[string]bool
+	applySignal    chan struct{}
 }
 
 func NewNode(
@@ -85,6 +86,11 @@ func NewNode(
 		stopCh: make(
 			chan struct{},
 		),
+
+		applySignal: make(
+			chan struct{},
+			1,
+		),
 	}
 
 	return n
@@ -122,18 +128,25 @@ func (n *Node) Log() *Log {
 	return n.log
 }
 
-func (n *Node) Submit(
-	command Command,
-) error {
-
+// Submit 客户端入口：Leader 追加命令到日志并立即广播复制
+func (n *Node) Submit(command Command) error {
 	n.mu.Lock()
-
-	defer n.mu.Unlock()
-
 	if n.role != Leader {
-
+		n.mu.Unlock()
 		return ErrNotLeader
 	}
+
+	// 追加到自己的日志（带当前 term）
+	n.log.Append(LogEntry{
+		Index:   n.log.LastIndex() + 1,
+		Term:    n.currentTerm,
+		Command: command,
+	})
+	_ = SaveLog(n.cfg.DataDir, n.log)
+	n.mu.Unlock()
+
+	// 立即推一轮，不用等下一个心跳周期
+	go n.broadcastAppendEntries()
 
 	return nil
 }
