@@ -40,12 +40,21 @@ function App() {
       body: JSON.stringify({ name: name.trim() }),
     })
 
+    // load history once on connect; new messages arrive via SSE below
+    try {
+      const res = await fetch(`${API}/api/messages/history`)
+      const data = await res.json()
+      const hist = (data.messages || []).map((m) => ({ from: m.from, to: m.to, text: m.text, id: m.id }))
+      setMessages(hist)
+    } catch { /* history unavailable, start empty */ }
+
     // open SSE stream
     const es = new EventSource(`${API}/stream/${encodeURIComponent(name.trim())}`)
     es.addEventListener('message', (e) => {
       try {
         const evt = JSON.parse(e.data)
-        setMessages((prev) => [...prev, { from: evt.from, to: evt.to, text: evt.text, id: Date.now() + Math.random() }])
+        // id is server-assigned (stable across nodes)
+        setMessages((prev) => [...prev, { from: evt.from, to: evt.to, text: evt.text, id: evt.id || Date.now() + Math.random() }])
       } catch { /* malformed event, skip */ }
     })
     es.onerror = () => {
