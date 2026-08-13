@@ -4,9 +4,37 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>IM System</title>
+    <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
+    <div id="app">
+      <!-- 登录页 -->
+      <div id="login-screen" class="login-screen">
+        <div class="login-card">
+          <h1>💬 IM System</h1>
+          <p class="subtitle">Enter your name to join the chat</p>
+          <input id="name-input" class="name-input" placeholder="Your name" autofocus />
+          <button id="join-btn" class="btn-primary" disabled>Join</button>
+        </div>
+      </div>
+
+      <!-- 聊天界面 -->
+      <div id="chat-layout" class="chat-layout" style="display: none">
+        <aside class="sidebar">
+          <button id="public-chat-btn" class="public-chat-btn active">📢 Public Chat</button>
+          <div id="online-title" class="online-title">Online — 0</div>
+          <ul id="user-list" class="user-list"></ul>
+          <div class="sidebar-footer">👤 <span id="my-name"></span></div>
+        </aside>
+        <main class="chat-main">
+          <div id="messages" class="messages"></div>
+          <div class="input-bar">
+            <input id="msg-input" class="msg-input" placeholder="Type a message..." />
+            <button id="send-btn" class="btn-send" disabled>Send</button>
+          </div>
+        </main>
+      </div>
+    </div>
+    <script src="/app.js"></script>
   </body>
 </html>
