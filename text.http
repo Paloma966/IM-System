@@ -1,47 +1,39 @@
-###
-GET http://localhost:8080/ping
+# IM System — HTTP 接口调试
+# 默认 HTTP 端口 8001（-http 参数），Raft RPC 端口 9001（-raft 参数）
+# 单节点启动示例：go run ./cmd -id node-1 -http :8001 -raft :9001
 
-###
-GET http://localhost:8080/user/alice
+### 健康检查
+GET http://localhost:8001/ping
 
-###
-GET http://localhost:8080/user/bob
-
-###
-GET http://localhost:8080/search?q=hello
-
-###
-POST http://localhost:8080/api/message
-Content-Type: application/json
-
-{
-  "to": "alice",
-  "text": "你好"
-}
-
-###
-POST http://localhost:8080/connect
+### 连接（登录）：alice
+POST http://localhost:8001/connect
 Content-Type: application/json
 
 {"name": "alice"}
 
-###
-POST http://localhost:8080/connect
+### 连接（登录）：bob
+POST http://localhost:8001/connect
 Content-Type: application/json
 
 {"name": "bob"}
 
-###
-GET http://localhost:8080/users
+### 在线用户列表（本节点本地状态）
+GET http://localhost:8001/users
 
-###
-POST http://localhost:8080/api/messages
+### 群发消息（to 为空或 "all" 表示广播）
+POST http://localhost:8001/api/messages
 Content-Type: application/json
 
-{"to": "alice", "text": "你好"}
+{"from": "alice", "to": "all", "text": "大家好"}
 
-###
-GET http://localhost:8080/inbox/alice
+### 私聊消息（to 指定接收方）
+POST http://localhost:8001/api/messages
+Content-Type: application/json
 
-###
-GET http://localhost:8080/inbox/alice
+{"from": "alice", "to": "bob", "text": "你好 bob"}
+
+### 消息历史（走 Raft，所有节点一致）
+GET http://localhost:8001/api/messages/history
+
+### SSE 实时订阅（浏览器 EventSource 用；命令行可用 curl -N 观察）
+GET http://localhost:8001/stream/alice

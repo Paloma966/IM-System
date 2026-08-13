@@ -35,24 +35,29 @@ func main() {
 	id := flag.String("id", "node-1", "node id")
 	httpAddr := flag.String("http", ":8001", "http addr for browser")
 	raftAddr := flag.String("raft", ":9001", "raft rpc addr")
-	peersStr := flag.String("peers", "", "comma-separated peers: id:raftAddr:httpAddr")
+	peersStr := flag.String("peers", "", "comma-separated peers: id@host:raftPort:httpPort (e.g. node-2@node-2:9002:8002)")
 	dataDir := flag.String("data", "", "data dir (default ./data/<id>)")
 	flag.Parse()
 
-	// 解析 peers: "node-2:9002:8002,node-3:9003:8003" → []raft.Peer
+	// 解析 peers: "node-2@node-2:9002:8002,node-3@node-3:9003:8003" → []raft.Peer
+	// 格式：id@host:raftPort:httpPort，host 是节点可达的主机名/IP（容器环境用服务名）
 	var peers []raft.Peer
 	for s := range strings.SplitSeq(*peersStr, ",") {
 		if s == "" {
 			continue
 		}
-		parts := strings.Split(s, ":")
-		if len(parts) != 3 {
-			log.Fatalf("bad peer %q (want id:raftAddr:httpAddr)", s)
+		id, rest, ok := strings.Cut(s, "@")
+		if !ok {
+			log.Fatalf("bad peer %q (want id@host:raftPort:httpPort)", s)
+		}
+		hp := strings.Split(rest, ":")
+		if len(hp) != 3 {
+			log.Fatalf("bad peer %q (want id@host:raftPort:httpPort)", s)
 		}
 		peers = append(peers, raft.Peer{
-			ID:       parts[0],
-			RaftAddr: ":" + parts[1],
-			HTTPAddr: ":" + parts[2],
+			ID:       id,
+			RaftAddr: hp[0] + ":" + hp[1],
+			HTTPAddr: hp[0] + ":" + hp[2],
 		})
 	}
 
@@ -112,15 +117,15 @@ func main() {
 		c.Next()
 	})
 
-	r.Static("/assets", "./web/dist/assets")
-	r.StaticFile("/favicon.ico", "./web/dist/favicon.ico")
+	r.StaticFile("/app.js", "./web/app.js")
+	r.StaticFile("/style.css", "./web/style.css")
 
 	r.GET("/ping", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "pong"})
 	})
 
 	r.GET("/", func(c *gin.Context) {
-		c.File("./web/dist/index.html")
+		c.File("./web/index.html")
 	})
 
 	// POST /api/messages 发消息：Leader 直接提交到 Raft 日志，Follower 转发给 Leader
@@ -181,14 +186,12 @@ func main() {
 	})
 
 	r.GET("/users", func(c *gin.Context) {
-		mu.RLock()
-		defer mu.RUnlock()
-
-		list := make([]string, 0, len(users))
-		for name := range users {
-			list = append(list, name)
+		// 内部扇出专用：只返回本节点在线用户，避免 /users 递归调用自己
+		if c.Query("local") == "1" {
+			c.JSON(http.StatusOK, gin.H{"users": localUsers()})
+			return
 		}
-		c.JSON(http.StatusOK, gin.H{"users": list})
+		c.JSON(http.StatusOK, gin.H{"users": globalUsers(peers)})
 	})
 
 	r.GET("/stream/:name", func(c *gin.Context) {
@@ -212,9 +215,14 @@ func main() {
 				c.SSEvent("message", msg)
 				c.Writer.Flush()
 			case <-c.Request.Context().Done():
+				// 只有当自己仍是当前 channel 时才清理：页面刷新会触发
+				// /connect 用新 channel 覆盖 subscribers[name]，旧连接的清理
+				// 若不加判断会把新连接和用户一并删掉（重连竞态）。
 				mu.Lock()
-				delete(subscribers, name)
-				delete(users, name)
+				if subscribers[name] == ch {
+					delete(subscribers, name)
+					delete(users, name)
+				}
 				mu.Unlock()
 				return
 			}

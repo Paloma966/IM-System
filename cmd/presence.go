@@ -1,0 +1,74 @@
+package main
+
+import (
+	"encoding/json"
+	"net/http"
+	"sort"
+	"time"
+
+	"IMSystem/internal/raft"
+)
+
+// peerUserTimeout 扇出拉取单个 peer 在线列表的超时。设短一点，避免某个
+// peer 挂掉时把 /users 整个拖慢；前端每 3 秒轮询一次，量很小。
+const peerUserTimeout = 500 * time.Millisecond
+
+// localUsers 返回本节点在线用户（已排序）。数据源是本地 users map。
+func localUsers() []string {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	list := make([]string, 0, len(users))
+	for name := range users {
+		list = append(list, name)
+	}
+	sort.Strings(list)
+	return list
+}
+
+// mergeUsers 合并多组用户，去重并排序（纯函数，便于单测）。
+func mergeUsers(sets ...[]string) []string {
+	seen := make(map[string]bool)
+	for _, set := range sets {
+		for _, name := range set {
+			seen[name] = true
+		}
+	}
+
+	list := make([]string, 0, len(seen))
+	for name := range seen {
+		list = append(list, name)
+	}
+	sort.Strings(list)
+	return list
+}
+
+// globalUsers 聚合全局在线用户：本地 + 各 peer 的本地集合。
+// 任一 peer 失败/超时就跳过（优雅降级），不会拖垮整个 /users。
+func globalUsers(peers []raft.Peer) []string {
+	client := &http.Client{Timeout: peerUserTimeout}
+
+	sets := [][]string{localUsers()}
+	for _, peer := range peers {
+		sets = append(sets, fetchPeerUsers(client, peer))
+	}
+	return mergeUsers(sets...)
+}
+
+// fetchPeerUsers 向 peer 拉取其本地在线用户；失败/超时返回 nil。
+// 走 ?local=1，只取该节点的本地集合，避免 /users 递归。
+func fetchPeerUsers(client *http.Client, peer raft.Peer) []string {
+	resp, err := client.Get("http://" + peer.HTTPAddr + "/users?local=1")
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	var body struct {
+		Users []string `json:"users"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil
+	}
+	return body.Users
+}
