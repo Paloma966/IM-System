@@ -31,6 +31,7 @@ var (
 	mu          sync.RWMutex
 )
 
+// main 装配 Raft 节点、聊天状态机与 HTTP 服务
 func main() {
 	id := flag.String("id", "node-1", "node id")
 	httpAddr := flag.String("http", ":8001", "http addr for browser")

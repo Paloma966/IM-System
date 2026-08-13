@@ -6,10 +6,12 @@ import (
 	"time"
 )
 
+// ErrNotLeader 非 Leader 提交命令时返回
 var ErrNotLeader = errors.New(
 	"raft: not leader",
 )
 
+// Node 一个 Raft 节点：管理角色、任期、日志，并把已提交命令推给状态机
 type Node struct {
 	cfg            Config
 	transport      Transport
@@ -32,6 +34,7 @@ type Node struct {
 	applySignal    chan struct{}
 }
 
+// NewNode 创建节点：从磁盘恢复任期与日志（失败则用默认值）
 func NewNode(
 	cfg Config,
 	transport Transport,
@@ -96,6 +99,7 @@ func NewNode(
 	return n
 }
 
+// Role 返回当前角色
 func (n *Node) Role() Role {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
@@ -103,6 +107,7 @@ func (n *Node) Role() Role {
 	return n.role
 }
 
+// CurrentTerm 返回当前任期
 func (n *Node) CurrentTerm() uint64 {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
@@ -110,10 +115,12 @@ func (n *Node) CurrentTerm() uint64 {
 	return n.currentTerm
 }
 
+// IsLeader 当前是否为 Leader
 func (n *Node) IsLeader() bool {
 	return n.Role() == Leader
 }
 
+// LeaderID 返回当前已知的 Leader id（未知时为空）
 func (n *Node) LeaderID() string {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
@@ -121,6 +128,7 @@ func (n *Node) LeaderID() string {
 	return n.leaderID
 }
 
+// Log 返回日志（测试用）
 func (n *Node) Log() *Log {
 	n.mu.RLock()
 	defer n.mu.RUnlock()

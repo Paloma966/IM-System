@@ -133,6 +133,7 @@ func (n *Node) runElectionTimer() {
 // 拉票
 // ============================================================
 
+// requestVote 向单个 peer 拉票，成功则计入并检查是否过半
 func (n *Node) requestVote(peer Peer, req RequestVoteRequest) {
 	if n.transport == nil {
 		return
@@ -186,6 +187,7 @@ func (n *Node) becomeLeaderLocked() {
 // Start / Stop
 // ============================================================
 
+// Start 启动节点：进入 Follower，启动选举定时器与应用循环
 func (n *Node) Start() {
 	n.mu.Lock()
 	n.role = Follower
@@ -194,6 +196,7 @@ func (n *Node) Start() {
 	go n.runApplyLoop()
 }
 
+// Stop 停止节点：关闭定时器并通知各循环退出
 func (n *Node) Stop() {
 	n.mu.Lock()
 	n.role = Follower // 让 broadcastAppendEntries 循环看到 role!=Leader 自己退出

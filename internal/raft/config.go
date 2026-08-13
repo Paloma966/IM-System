@@ -2,6 +2,7 @@ package raft
 
 import "time"
 
+// Role Raft 节点角色
 type Role int
 
 const (
@@ -24,12 +25,14 @@ func (r Role) String() string {
 	}
 }
 
+// Peer 集群中的一个对端节点
 type Peer struct {
 	ID       string
 	RaftAddr string
 	HTTPAddr string
 }
 
+// Config Raft 节点配置
 type Config struct {
 	ID string
 

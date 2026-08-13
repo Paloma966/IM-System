@@ -76,12 +76,14 @@ func NewHTTPTransport() *HTTPTransport {
 	return &HTTPTransport{client: &http.Client{Timeout: time.Second}}
 }
 
+// RequestVote 实现 Transport：向 peer 发投票请求
 func (t *HTTPTransport) RequestVote(peer Peer, req RequestVoteRequest) RequestVoteResponse {
 	var resp RequestVoteResponse
 	t.doRPC(peer.RaftAddr, "/raft/vote", req, &resp)
 	return resp
 }
 
+// AppendEntries 实现 Transport：向 peer 发日志复制请求
 func (t *HTTPTransport) AppendEntries(peer Peer, req AppendEntriesRequest) AppendEntriesResponse {
 	var resp AppendEntriesResponse
 	t.doRPC(peer.RaftAddr, "/raft/append", req, &resp)

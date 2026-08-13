@@ -12,11 +12,13 @@ const (
 	logFile  = "log.json"
 )
 
+// meta 持久化的任期与投票记录
 type meta struct {
 	CurrentTerm uint64 `json:"current_term"`
 	VotedFor    string `json:"voted_for"`
 }
 
+// SaveMeta 把 currentTerm 和 votedFor 写到 meta.json
 func SaveMeta(
 	dataDir string,
 	term uint64,
@@ -42,6 +44,7 @@ func SaveMeta(
 	return os.WriteFile(path, data, 0644)
 }
 
+// LoadMeta 从 meta.json 恢复任期与投票；文件不存在时返回 (0,"",nil)
 func LoadMeta(dataDir string) (uint64, string, error) {
 	path := filepath.Join(dataDir, metaFile)
 	data, err := os.ReadFile(path)
@@ -61,6 +64,7 @@ func LoadMeta(dataDir string) (uint64, string, error) {
 	return m.CurrentTerm, m.VotedFor, nil
 }
 
+// SaveLog 把日志（跳过 index=0 的哨兵）写到 log.json
 func SaveLog(dataDir string, log *Log) error {
 
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
@@ -91,6 +95,7 @@ func SaveLog(dataDir string, log *Log) error {
 	)
 }
 
+// LoadLog 从 log.json 恢复日志；文件不存在时返回带哨兵的空日志
 func LoadLog(dataDir string) (*Log, error) {
 
 	path := filepath.Join(
