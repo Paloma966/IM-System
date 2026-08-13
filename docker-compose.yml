@@ -1,0 +1,64 @@
+services:
+  # 三个 Raft 节点，镜像完全一样，只有启动参数不同。
+  # 容器间通过服务名（node-1/node-2/node-3）互相访问，这正是 peer 地址里 host 的用途。
+  node-1:
+    build: .
+    image: im-system
+    command:
+      - -id
+      - node-1
+      - -http
+      - 0.0.0.0:8001
+      - -raft
+      - 0.0.0.0:9001
+      - -peers
+      - node-2@node-2:9002:8002,node-3@node-3:9003:8003
+      - -data
+      - /data
+    ports:
+      - "8001:8001"   # 浏览器访问 http://localhost:8001
+    volumes:
+      - node1-data:/data
+
+  node-2:
+    build: .
+    image: im-system
+    command:
+      - -id
+      - node-2
+      - -http
+      - 0.0.0.0:8002
+      - -raft
+      - 0.0.0.0:9002
+      - -peers
+      - node-1@node-1:9001:8001,node-3@node-3:9003:8003
+      - -data
+      - /data
+    ports:
+      - "8002:8002"   # 也可以直接访问 http://localhost:8002
+    volumes:
+      - node2-data:/data
+
+  node-3:
+    build: .
+    image: im-system
+    command:
+      - -id
+      - node-3
+      - -http
+      - 0.0.0.0:8003
+      - -raft
+      - 0.0.0.0:9003
+      - -peers
+      - node-1@node-1:9001:8001,node-2@node-2:9002:8002
+      - -data
+      - /data
+    ports:
+      - "8003:8003"
+    volumes:
+      - node3-data:/data
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
