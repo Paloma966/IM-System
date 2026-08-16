@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/hmac"
 	crand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -257,9 +258,33 @@ func main() {
 			c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"})
 			return
 		}
-		name, ok := requireAuth(c)
-		if !ok {
-			return
+
+		// 身份来源分两种：
+		// 1) 普通客户端：校验会话令牌；
+		// 2) peer 转发（X-Im-Forwarded）：Follower 已校验过客户端令牌，
+		//    用集群密钥证明自己是集群成员，并带上已校验的用户名。
+		var name string
+		if c.GetHeader("X-Im-Forwarded") != "" {
+			// 已转发过一次：若本节点仍不是 Leader，不再继续转发（防多跳/环路）
+			if !node.IsLeader() {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "leadership changed, retry later"})
+				return
+			}
+			if *secret == "" || !hmac.Equal([]byte(c.GetHeader("X-Node-Secret")), []byte(*secret)) {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized forward"})
+				return
+			}
+			name = c.GetHeader("X-Im-User")
+			if name == "" || utf8.RuneCountInString(name) > maxNameLen {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "missing forwarded user"})
+				return
+			}
+		} else {
+			n, ok := requireAuth(c)
+			if !ok {
+				return
+			}
+			name = n
 		}
 
 		var req chat.Message
@@ -298,18 +323,13 @@ func main() {
 			return
 		}
 
-		// 不是 Leader → 转发给 Leader 的 HTTP 接口。
-		// 已转发过一次的请求不再转发（防多跳/环路）。
-		if c.GetHeader("X-Im-Forwarded") != "" {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "leadership changed, retry later"})
-			return
-		}
+		// 不是 Leader → 转发给 Leader 的 HTTP 接口
 		leader := node.LeaderHTTPAddr()
 		if leader == "" {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no leader known yet, retry later"})
 			return
 		}
-		forwardToLeader(c, msg, leader, bearerToken(c), scheme)
+		forwardToLeader(c, msg, leader, scheme, *secret)
 	})
 
 	// GET /api/messages/history 返回状态机历史（任何节点都一致）。
@@ -386,7 +406,7 @@ func main() {
 		// 内部扇出专用：只返回本节点在线用户，避免 /users 递归调用自己。
 		// 仅集群内节点（持有共享密钥）可调用。
 		if c.Query("local") == "1" {
-			if *secret == "" || c.GetHeader("X-Node-Secret") != *secret {
+			if *secret == "" || !hmac.Equal([]byte(c.GetHeader("X-Node-Secret")), []byte(*secret)) {
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 				return
 			}
@@ -513,9 +533,11 @@ func pushLocal(msg chat.Message) {
 }
 
 // forwardToLeader 把消息转发给 Leader 的 HTTP 接口（Follower 上的写请求）。
-// 带上发送者的会话令牌，Leader 端重新校验身份；带超时，防止 Leader
-// 无响应时请求悬挂耗尽资源；X-Im-Forwarded 标记防多跳转发。
-func forwardToLeader(c *gin.Context, msg chat.Message, leader, token, scheme string) {
+// Follower 已校验过客户端令牌，这里用集群密钥证明自己是集群成员，
+// 并把已验证的用户名带给 Leader（Leader 端不再要求客户端令牌，
+// 会话本来就只存在于 Follower 本地）。带超时，防止 Leader 无响应时
+// 请求悬挂耗尽资源。
+func forwardToLeader(c *gin.Context, msg chat.Message, leader, scheme, secret string) {
 	data, _ := json.Marshal(msg)
 	req, err := http.NewRequest(
 		http.MethodPost,
@@ -528,8 +550,9 @@ func forwardToLeader(c *gin.Context, msg chat.Message, leader, token, scheme str
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Im-Forwarded", "1")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Im-User", msg.From)
+	if secret != "" {
+		req.Header.Set("X-Node-Secret", secret)
 	}
 
 	resp, err := leaderHTTPClient.Do(req)
