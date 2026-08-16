@@ -1,4 +1,6 @@
 .git
 .gitignore
+.claude
 data/
 *.log
+*.md

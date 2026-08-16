@@ -1,6 +1,7 @@
 services:
   # 三个 Raft 节点，镜像完全一样，只有启动参数不同。
   # 容器间通过服务名（node-1/node-2/node-3）互相访问，这正是 peer 地址里 host 的用途。
+  # 节点间 RPC 需要共享密钥：部署时请设置环境变量 RAFT_SECRET（见 README）。
   node-1:
     build: .
     image: im-system
@@ -15,10 +16,15 @@ services:
       - node-2@node-2:9002:8002,node-3@node-3:9003:8003
       - -data
       - /data
+      - -secret
+      - ${RAFT_SECRET:-change-me-dev-secret}
+    environment:
+      - HTTP_PORT=8001
     ports:
       - "8001:8001"   # 浏览器访问 http://localhost:8001
     volumes:
       - node1-data:/data
+    restart: unless-stopped
 
   node-2:
     build: .
@@ -34,10 +40,15 @@ services:
       - node-1@node-1:9001:8001,node-3@node-3:9003:8003
       - -data
       - /data
+      - -secret
+      - ${RAFT_SECRET:-change-me-dev-secret}
+    environment:
+      - HTTP_PORT=8002
     ports:
       - "8002:8002"   # 也可以直接访问 http://localhost:8002
     volumes:
       - node2-data:/data
+    restart: unless-stopped
 
   node-3:
     build: .
@@ -53,10 +64,15 @@ services:
       - node-1@node-1:9001:8001,node-2@node-2:9002:8002
       - -data
       - /data
+      - -secret
+      - ${RAFT_SECRET:-change-me-dev-secret}
+    environment:
+      - HTTP_PORT=8003
     ports:
       - "8003:8003"
     volumes:
       - node3-data:/data
+    restart: unless-stopped
 
 volumes:
   node1-data:
