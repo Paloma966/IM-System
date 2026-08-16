@@ -111,6 +111,34 @@ function updatePlaceholder() {
 
 // ---------- 数据 ----------
 
+// 按 id 去重合并两组消息，并按时间戳排序。
+// 历史与 SSE 会有一段重叠窗口：同一条消息可能两边都收到，
+// 用 id 去重即可（服务端生成的 id 全局唯一）。
+function mergeMessages(base, incoming) {
+  const byId = new Map();
+  [...base, ...incoming].forEach((m) => {
+    if (m && m.id) byId.set(m.id, m);
+  });
+  return [...byId.values()].sort((a, b) => (a.ts || 0) - (b.ts || 0));
+}
+
+// 拉取历史并合并进本地消息列表（连接/重连后调用，补齐 SSE 断线缺口）
+async function loadHistory() {
+  try {
+    const res = await fetch('/api/messages/history', { headers: authHeaders() });
+    if (res.status === 401) {
+      alert('登录已失效，请重新加入');
+      return;
+    }
+    const data = await res.json();
+    const incoming = (data.messages || []).map((m) => ({ from: m.from, to: m.to, text: m.text, id: m.id, ts: m.ts }));
+    state.messages = mergeMessages(state.messages, incoming);
+    renderMessages();
+  } catch {
+    // 历史不可用，保留已有消息
+  }
+}
+
 async function connect() {
   const name = nameInput.value.trim();
   if (!name) return;
@@ -128,29 +156,24 @@ async function connect() {
   const login = await res.json();
   state.token = login.token;
 
-  // 连接后加载一次历史；后续新消息走 SSE
-  try {
-    const hres = await fetch('/api/messages/history', { headers: authHeaders() });
-    const data = await hres.json();
-    state.messages = (data.messages || []).map((m) => ({ from: m.from, to: m.to, text: m.text, id: m.id, ts: m.ts }));
-  } catch {
-    // 历史不可用，从空开始
-  }
-
-  // SSE 实时订阅（EventSource 断线会自动重连；token 走查询参数）
+  // 先开 SSE 再拉历史：两者重叠窗口内的消息靠 id 去重，
+  // 保证既不丢也不重复。
   eventSource = new EventSource(`/stream/${encodeURIComponent(name)}?token=${encodeURIComponent(state.token)}`);
   eventSource.addEventListener('message', (e) => {
     try {
       const evt = JSON.parse(e.data);
-      state.messages = [
-        ...state.messages,
+      state.messages = mergeMessages(state.messages, [
         { from: evt.from, to: evt.to, text: evt.text, id: evt.id, ts: evt.ts },
-      ];
+      ]);
       renderMessages();
     } catch {
       // 坏事件，忽略
     }
   });
+  // 首次连接与断线自动重连后都会触发 open：重拉历史补齐断线期间漏掉的消息
+  eventSource.addEventListener('open', loadHistory);
+
+  await loadHistory();
 
   // 切到聊天界面
   loginScreen.style.display = 'none';
@@ -168,13 +191,21 @@ async function send() {
   sendBtn.disabled = true;
 
   try {
-    await fetch('/api/messages', {
+    const res = await fetch('/api/messages', {
       method: 'POST',
       headers: authHeaders(),
       body: JSON.stringify(payload),
     });
-  } catch {
-    // 忽略发送失败
+    if (!res.ok) {
+      throw new Error(`send failed: ${res.status}`);
+    }
+  } catch (err) {
+    // 发送失败：恢复输入内容并提示，不能让消息静默丢失
+    msgInput.value = text;
+    alert(`发送失败：${err.message || err}`);
+  } finally {
+    sendBtn.disabled = false;
+    msgInput.focus();
   }
 }
 
