@@ -38,6 +38,7 @@ func main() {
 	raftAddr := flag.String("raft", ":9001", "raft rpc addr")
 	peersStr := flag.String("peers", "", "comma-separated peers: id@host:raftPort:httpPort (e.g. node-2@node-2:9002:8002)")
 	dataDir := flag.String("data", "", "data dir (default ./data/<id>)")
+	secret := flag.String("secret", "", "shared secret for node-to-node RPC auth (required when -peers is set)")
 	flag.Parse()
 
 	// 解析 peers: "node-2@node-2:9002:8002,node-3@node-3:9003:8003" → []raft.Peer
@@ -77,7 +78,12 @@ func main() {
 		HeartbeatInterval: 50 * time.Millisecond,
 	}
 
-	node := raft.NewNode(cfg, raft.NewHTTPTransport())
+	// 多节点集群必须配置共享密钥，否则节点间 RPC 无法互相认证
+	if len(peers) > 0 && *secret == "" {
+		log.Fatal("-secret is required when -peers is set")
+	}
+
+	node := raft.NewNode(cfg, raft.NewHTTPTransport(*secret))
 	node.Start()
 	defer node.Stop()
 
@@ -96,8 +102,8 @@ func main() {
 		}
 	}()
 
-	// Raft RPC server：节点间通信端口（/raft/vote、/raft/append）
-	raftSrv := raft.NewRaftHTTPServer(node)
+	// Raft RPC server：节点间通信端口（/raft/vote、/raft/append），带 HMAC 认证
+	raftSrv := raft.NewRaftHTTPServer(node, *secret)
 	go func() {
 		log.Printf("raft rpc listening on %s", *raftAddr)
 		log.Fatal(raftSrv.ListenAndServe())

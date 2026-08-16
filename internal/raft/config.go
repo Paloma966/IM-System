@@ -60,3 +60,15 @@ func (c Config) Peer(id string) (Peer, bool) {
 
 	return Peer{}, false
 }
+
+// HasPeer 判断 id 是否为集群成员（不含自己）。
+// 用于 RPC 入口校验对端身份，防止伪造的 LeaderID/CandidateID
+// 污染节点状态或劫持写转发。
+func (c Config) HasPeer(id string) bool {
+	for _, peer := range c.Peers {
+		if peer.ID == id {
+			return true
+		}
+	}
+	return false
+}
