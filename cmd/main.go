@@ -186,9 +186,8 @@ func main() {
 				log.Println("apply:", err)
 				continue
 			}
-			hist := state.History()
-			if len(hist) > 0 {
-				pushLocal(hist[len(hist)-1]) // 推最新这条给相关 SSE 连接
+			if msg, ok := state.Last(); ok {
+				pushLocal(msg) // 推最新这条给相关 SSE 连接
 			}
 		}
 	}()
@@ -285,8 +284,14 @@ func main() {
 		if node.IsLeader() {
 			payload, _ := json.Marshal(msg)
 			cmd := raft.Command{Type: "message", Payload: payload}
-			if _, err := node.Submit(cmd); err != nil {
+			index, err := node.Submit(cmd)
+			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			// 等待提交确认：写入多数派后才回"发送成功"，客户端可以信任 ack
+			if err := node.WaitCommitted(index, 3*time.Second); err != nil {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "not committed: " + err.Error()})
 				return
 			}
 			c.JSON(http.StatusOK, gin.H{"ok": true})

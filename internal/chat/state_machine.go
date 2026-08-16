@@ -30,6 +30,12 @@ func (s *State) Apply(cmd raft.Command) error {
 		return err
 	}
 
+	// 归一化：历史数据与新旧客户端可能用 "" 表示群聊，统一为 "all"，
+	// 保证所有节点状态一致，过滤与推送逻辑只认一种编码。
+	if msg.To == "" {
+		msg.To = "all"
+	}
+
 	s.mu.Lock()
 	s.messages = append(s.messages, msg)
 	s.mu.Unlock()
@@ -42,6 +48,17 @@ func (s *State) History() []Message {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return append([]Message(nil), s.messages...)
+}
+
+// Last 返回最新一条消息。SSE 推送只需最新条目，
+// 用它替代 History() 全量拷贝再取尾部的 O(n) 开销。
+func (s *State) Last() (Message, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.messages) == 0 {
+		return Message{}, false
+	}
+	return s.messages[len(s.messages)-1], true
 }
 
 // FilterVisible 返回 user 可见的消息：群聊（to 为 "" 或 "all"）全员可见，
