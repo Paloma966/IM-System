@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 )
@@ -84,12 +88,38 @@ const (
 type HTTPTransport struct {
 	client *http.Client
 	secret string
+	scheme string
 }
 
 // NewHTTPTransport 创建一个带超时与共享密钥的 HTTP transport。
 // secret 为空时请求不带签名，只能用于测试。
 func NewHTTPTransport(secret string) *HTTPTransport {
-	return &HTTPTransport{client: &http.Client{Timeout: time.Second}, secret: secret}
+	return &HTTPTransport{
+		client: &http.Client{Timeout: time.Second},
+		secret: secret,
+		scheme: "http",
+	}
+}
+
+// EnableTLS 让 transport 改用 https，并信任 certFile 中的证书作为根证书
+// （适用于集群共享自签名证书的场景）。不启用时默认 http。
+func (t *HTTPTransport) EnableTLS(certFile string) error {
+	pool := x509.NewCertPool()
+	pem, err := os.ReadFile(certFile)
+	if err != nil {
+		return err
+	}
+	if !pool.AppendCertsFromPEM(pem) {
+		return fmt.Errorf("no certificates found in %s", certFile)
+	}
+	t.scheme = "https"
+	t.client.Transport = &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:    pool,
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+	return nil
 }
 
 // RequestVote 实现 Transport：向 peer 发投票请求
@@ -115,7 +145,7 @@ func (t *HTTPTransport) doRPC(raftAddr, path string, req, resp any) {
 
 	httpReq, err := http.NewRequest(
 		http.MethodPost,
-		"http://"+raftAddr+path,
+		t.scheme+"://"+raftAddr+path,
 		bytes.NewReader(data),
 	)
 	if err != nil {

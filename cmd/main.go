@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +38,9 @@ var (
 	nameToken   = make(map[string]string)
 	mu          sync.RWMutex
 )
+
+// leaderHTTPClient 转发写请求到 Leader 的客户端（带超时，main 里按 TLS 配置构造）
+var leaderHTTPClient *http.Client
 
 const (
 	// maxNameLen 用户名最大长度（rune）
@@ -98,7 +102,19 @@ func main() {
 	peersStr := flag.String("peers", "", "comma-separated peers: id@host:raftPort:httpPort (e.g. node-2@node-2:9002:8002)")
 	dataDir := flag.String("data", "", "data dir (default ./data/<id>)")
 	secret := flag.String("secret", "", "shared secret for node-to-node RPC auth (required when -peers is set)")
+	debug := flag.Bool("debug", false, "enable gin debug mode (default: release mode)")
+	tlsCert := flag.String("tls-cert", "", "TLS certificate file (with -tls-key enables HTTPS for HTTP and Raft RPC)")
+	tlsKey := flag.String("tls-key", "", "TLS private key file")
 	flag.Parse()
+
+	if !*debug {
+		gin.SetMode(gin.ReleaseMode)
+	}
+
+	// TLS 证书与私钥必须成对提供
+	if (*tlsCert == "") != (*tlsKey == "") {
+		log.Fatal("both -tls-cert and -tls-key must be set to enable TLS")
+	}
 
 	// 解析 peers: "node-2@node-2:9002:8002,node-3@node-3:9003:8003" → []raft.Peer
 	// 格式：id@host:raftPort:httpPort，host 是节点可达的主机名/IP（容器环境用服务名）
@@ -142,7 +158,20 @@ func main() {
 		log.Fatal("-secret is required when -peers is set")
 	}
 
-	node, err := raft.NewNode(cfg, raft.NewHTTPTransport(*secret))
+	// 内部互访用的 scheme：启用 TLS 后 peer 间转发/扇出走 https，
+	// 客户端信任 -tls-cert 指定的证书（集群共享自签名证书场景）。
+	scheme := "http"
+	transport := raft.NewHTTPTransport(*secret)
+	if *tlsCert != "" {
+		if err := transport.EnableTLS(*tlsCert); err != nil {
+			log.Fatalf("enable tls: %v", err)
+		}
+		scheme = "https"
+	}
+	peerClient = newPeerHTTPClient(peerUserTimeout, *tlsCert)
+	leaderHTTPClient = newPeerHTTPClient(3*time.Second, *tlsCert)
+
+	node, err := raft.NewNode(cfg, transport)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -168,15 +197,29 @@ func main() {
 	raftSrv := raft.NewRaftHTTPServer(node, *secret)
 	go func() {
 		log.Printf("raft rpc listening on %s", *raftAddr)
-		log.Fatal(raftSrv.ListenAndServe())
+		var err error
+		if *tlsCert != "" {
+			err = raftSrv.ListenAndServeTLS(*tlsCert, *tlsKey)
+		} else {
+			err = raftSrv.ListenAndServe()
+		}
+		if err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
 	}()
 
 	r := gin.Default()
 
+	// CORS：前端由本服务同源托管，只放行同源跨域请求（不再使用通配符 *）
 	r.Use(func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type")
+		if origin := c.GetHeader("Origin"); origin != "" {
+			if u, err := url.Parse(origin); err == nil && strings.EqualFold(u.Host, c.Request.Host) {
+				c.Header("Access-Control-Allow-Origin", origin)
+				c.Header("Vary", "Origin")
+				c.Header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+				c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			}
+		}
 
 		if c.Request.Method == http.MethodOptions {
 			c.Status(http.StatusNoContent)
@@ -185,6 +228,17 @@ func main() {
 
 		c.Next()
 	})
+
+	// 请求体大小限制：所有带 body 的请求上限 1 MiB，防止超大 JSON 打爆内存
+	r.Use(func(c *gin.Context) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
+		c.Next()
+	})
+
+	// 限流器：写接口从严，读接口放宽，SSE 限制并发连接数
+	writeLimiter := newIPLimiter(5, 10)
+	readLimiter := newIPLimiter(30, 60)
+	streamLimiter := newStreamLimiter(10)
 
 	r.StaticFile("/app.js", "./web/app.js")
 	r.StaticFile("/style.css", "./web/style.css")
@@ -200,6 +254,10 @@ func main() {
 	// POST /api/messages 发消息：Leader 直接提交到 Raft 日志，Follower 转发给 Leader。
 	// 发送者身份取自会话令牌，客户端提交的 from 字段被忽略（防冒充）。
 	r.POST("/api/messages", func(c *gin.Context) {
+		if !writeLimiter.allow(c.ClientIP()) {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"})
+			return
+		}
 		name, ok := requireAuth(c)
 		if !ok {
 			return
@@ -235,18 +293,27 @@ func main() {
 			return
 		}
 
-		// 不是 Leader → 转发给 Leader 的 HTTP 接口
+		// 不是 Leader → 转发给 Leader 的 HTTP 接口。
+		// 已转发过一次的请求不再转发（防多跳/环路）。
+		if c.GetHeader("X-Im-Forwarded") != "" {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "leadership changed, retry later"})
+			return
+		}
 		leader := node.LeaderHTTPAddr()
 		if leader == "" {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no leader known yet, retry later"})
 			return
 		}
-		forwardToLeader(c, msg, leader, bearerToken(c))
+		forwardToLeader(c, msg, leader, bearerToken(c), scheme)
 	})
 
 	// GET /api/messages/history 返回状态机历史（任何节点都一致）。
 	// 只返回请求者可见的消息（群聊 + 自己参与的私聊），?limit 控制条数。
 	r.GET("/api/messages/history", func(c *gin.Context) {
+		if !readLimiter.allow(c.ClientIP()) {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"})
+			return
+		}
 		name, ok := requireAuth(c)
 		if !ok {
 			return
@@ -265,6 +332,10 @@ func main() {
 	})
 
 	r.POST("/connect", func(c *gin.Context) {
+		if !writeLimiter.allow(c.ClientIP()) {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"})
+			return
+		}
 		var req ConnectRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -317,10 +388,14 @@ func main() {
 			c.JSON(http.StatusOK, gin.H{"users": localUsers()})
 			return
 		}
+		if !readLimiter.allow(c.ClientIP()) {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"})
+			return
+		}
 		if _, ok := requireAuth(c); !ok {
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"users": globalUsers(peers, *secret)})
+		c.JSON(http.StatusOK, gin.H{"users": globalUsers(peers, *secret, scheme)})
 	})
 
 	r.GET("/stream/:name", func(c *gin.Context) {
@@ -336,8 +411,21 @@ func main() {
 			return
 		}
 
+		// 并发连接数与请求频率限制，防止连接耗尽
+		ip := c.ClientIP()
+		if !readLimiter.allow(ip) || !streamLimiter.acquire(ip) {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many streams"})
+			return
+		}
+		defer streamLimiter.release(ip)
+
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
+
+		// SSE 是长连接：清除服务器 WriteTimeout 对本连接的写截止时间
+		if rc := http.NewResponseController(c.Writer); rc != nil {
+			_ = rc.SetWriteDeadline(time.Time{})
+		}
 
 		mu.RLock()
 		ch, ok := subscribers[name]
@@ -368,9 +456,24 @@ func main() {
 		}
 	})
 
+	// 显式 http.Server：设置超时防 Slowloris；SSE 在 handler 内清除写截止
+	srv := &http.Server{
+		Addr:              *httpAddr,
+		Handler:           r,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       90 * time.Second,
+	}
 	log.Printf("http listening on %s", *httpAddr)
-	if err := r.Run(*httpAddr); err != nil {
-		log.Fatal(err)
+	if *tlsCert != "" {
+		if err := srv.ListenAndServeTLS(*tlsCert, *tlsKey); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	} else {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
 	}
 }
 
@@ -405,12 +508,13 @@ func pushLocal(msg chat.Message) {
 }
 
 // forwardToLeader 把消息转发给 Leader 的 HTTP 接口（Follower 上的写请求）。
-// 带上发送者的会话令牌，Leader 端重新校验身份。
-func forwardToLeader(c *gin.Context, msg chat.Message, leader, token string) {
+// 带上发送者的会话令牌，Leader 端重新校验身份；带超时，防止 Leader
+// 无响应时请求悬挂耗尽资源；X-Im-Forwarded 标记防多跳转发。
+func forwardToLeader(c *gin.Context, msg chat.Message, leader, token, scheme string) {
 	data, _ := json.Marshal(msg)
 	req, err := http.NewRequest(
 		http.MethodPost,
-		"http://"+leader+"/api/messages",
+		scheme+"://"+leader+"/api/messages",
 		bytes.NewReader(data),
 	)
 	if err != nil {
@@ -418,11 +522,12 @@ func forwardToLeader(c *gin.Context, msg chat.Message, leader, token string) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Im-Forwarded", "1")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := leaderHTTPClient.Do(req)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to reach leader: " + err.Error()})
 		return
