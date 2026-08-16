@@ -16,7 +16,11 @@ func newTestNode(t *testing.T, id string) *Node {
 		HeartbeatInterval: 20 * time.Millisecond,
 	}
 
-	return NewNode(cfg, nil)
+	n, err := NewNode(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewNode: %v", err)
+	}
+	return n
 }
 
 func TestNewNodeState(t *testing.T) {

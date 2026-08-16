@@ -27,6 +27,7 @@ func (n *Node) handleAppendEntries(req AppendEntriesRequest) AppendEntriesRespon
 
 	// 规则 4+5：冲突截断 + 追加新条目
 	newEntries := req.Entries
+	truncated := false
 	i := 0
 	for i < len(newEntries) {
 		idx := newEntries[i].Index
@@ -38,13 +39,22 @@ func (n *Node) handleAppendEntries(req AppendEntriesRequest) AppendEntriesRespon
 			continue
 		}
 		n.log.TruncateFrom(idx) // 冲突：从这里开始全部删掉
+		truncated = true
 		break
 	}
 	newEntries = newEntries[i:]
-	n.log.AppendRange(newEntries)
 
-	// 持久化：follower 也要落盘，否则重启后日志全丢（leader 在 Submit 里存）
-	_ = SaveLog(n.cfg.DataDir, n.log)
+	// 持久化：follower 也要落盘，否则重启后日志全丢。
+	// 追加走 write-ahead（先落盘再改内存）；发生过截断则整写重写。
+	// 落盘失败时拒绝本请求（返回失败），Leader 下轮会重试。
+	if truncated {
+		if err := SaveLog(n.cfg.DataDir, n.log); err != nil {
+			return AppendEntriesResponse{Term: n.currentTerm, Success: false}
+		}
+	} else if err := AppendLog(n.cfg.DataDir, newEntries); err != nil {
+		return AppendEntriesResponse{Term: n.currentTerm, Success: false}
+	}
+	n.log.AppendRange(newEntries)
 
 	// 规则 6：推进 commitIndex（不超过我日志实际有的位置）
 	if req.LeaderCommit > n.commitIndex {

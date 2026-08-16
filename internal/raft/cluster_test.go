@@ -31,7 +31,10 @@ func newTestCluster(t *testing.T) map[string]*Node {
 			cfg.Peers = append(cfg.Peers, Peer{ID: other})
 		}
 
-		n := NewNode(cfg, transport)
+		n, err := NewNode(cfg, transport)
+		if err != nil {
+			t.Fatalf("NewNode(%s): %v", id, err)
+		}
 		transport.Register(n)
 		nodes[id] = n
 	}

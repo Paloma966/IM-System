@@ -23,7 +23,10 @@ func newRPCTestNode(t *testing.T, secret string) (*Node, *http.Server) {
 		ElectionTimeout:   200 * time.Millisecond,
 		HeartbeatInterval: 20 * time.Millisecond,
 	}
-	n := NewNode(cfg, nil)
+	n, err := NewNode(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewNode: %v", err)
+	}
 	return n, NewRaftHTTPServer(n, secret)
 }
 

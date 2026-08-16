@@ -142,7 +142,10 @@ func main() {
 		log.Fatal("-secret is required when -peers is set")
 	}
 
-	node := raft.NewNode(cfg, raft.NewHTTPTransport(*secret))
+	node, err := raft.NewNode(cfg, raft.NewHTTPTransport(*secret))
+	if err != nil {
+		log.Fatal(err)
+	}
 	node.Start()
 	defer node.Stop()
 

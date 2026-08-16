@@ -2,6 +2,7 @@ package raft
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -13,50 +14,48 @@ var ErrNotLeader = errors.New(
 
 // Node 一个 Raft 节点：管理角色、任期、日志，并把已提交命令推给状态机
 type Node struct {
-	cfg            Config
-	transport      Transport
-	applyCh        chan Command
-	mu             sync.RWMutex
-	role           Role
-	currentTerm    uint64
-	votedFor       string
-	leaderID       string
-	log            *Log
-	commitIndex    uint64
-	lastApplied    uint64
-	nextIndex      map[string]uint64
-	matchIndex     map[string]uint64
-	electionTimer  *time.Timer
-	heartbeatTimer *time.Timer
-	stopCh         chan struct{}
-	electionEpoch  uint64
-	votesReceived  map[string]bool
-	applySignal    chan struct{}
+	cfg             Config
+	transport       Transport
+	applyCh         chan Command
+	mu              sync.RWMutex
+	role            Role
+	currentTerm     uint64
+	votedFor        string
+	leaderID        string
+	log             *Log
+	commitIndex     uint64
+	lastApplied     uint64
+	nextIndex       map[string]uint64
+	matchIndex      map[string]uint64
+	electionTimer   *time.Timer
+	heartbeatTimer  *time.Timer
+	stopCh          chan struct{}
+	replicateSignal chan struct{}
+	electionEpoch   uint64
+	votesReceived   map[string]bool
+	applySignal     chan struct{}
 }
 
-// NewNode 创建节点：从磁盘恢复任期与日志（失败则用默认值）
+// NewNode 创建节点：从磁盘恢复任期与日志。
+// 持久化文件损坏时直接返回错误（Raft 要求 fail-fast，
+// 静默以空状态重启会破坏任期/日志的安全保证）。
 func NewNode(
 	cfg Config,
 	transport Transport,
-) *Node {
+) (*Node, error) {
 
 	term, votedFor, err := LoadMeta(
 		cfg.DataDir,
 	)
-
 	if err != nil {
-
-		term = 0
-		votedFor = ""
+		return nil, err
 	}
 
 	log, err := LoadLog(
 		cfg.DataDir,
 	)
-
 	if err != nil {
-
-		log = NewLog()
+		return nil, err
 	}
 
 	n := &Node{
@@ -90,13 +89,26 @@ func NewNode(
 			chan struct{},
 		),
 
+		replicateSignal: make(
+			chan struct{},
+			1,
+		),
+
 		applySignal: make(
 			chan struct{},
 			1,
 		),
 	}
 
-	return n
+	return n, nil
+}
+
+// signalReplicate 非阻塞唤醒 Leader 的心跳循环（可安全地在持锁时调用）
+func (n *Node) signalReplicate() {
+	select {
+	case n.replicateSignal <- struct{}{}:
+	default:
+	}
 }
 
 // Role 返回当前角色
@@ -136,7 +148,8 @@ func (n *Node) Log() *Log {
 	return n.log
 }
 
-// Submit 客户端入口：Leader 追加命令到日志并立即广播复制
+// Submit 客户端入口：Leader 追加命令到日志并立即触发一轮复制。
+// 先落盘（write-ahead，只追加新条目 O(1)）再改内存，落盘失败直接报错。
 func (n *Node) Submit(command Command) error {
 	n.mu.Lock()
 	if n.role != Leader {
@@ -145,20 +158,24 @@ func (n *Node) Submit(command Command) error {
 	}
 
 	// 追加到自己的日志（带当前 term）
-	n.log.Append(LogEntry{
+	entry := LogEntry{
 		Index:   n.log.LastIndex() + 1,
 		Term:    n.currentTerm,
 		Command: command,
-	})
-	_ = SaveLog(n.cfg.DataDir, n.log)
+	}
+	if err := AppendLog(n.cfg.DataDir, []LogEntry{entry}); err != nil {
+		n.mu.Unlock()
+		return fmt.Errorf("persist: %w", err)
+	}
+	n.log.Append(entry)
 
 	// 立刻尝试推进 commitIndex：单节点自己就过半，直接提交；
 	// 多节点 count=1 不过半，等 peer 确认（sendAppendEntries 再推进）。
 	n.advanceCommitIndexLocked()
 	n.mu.Unlock()
 
-	// 立即推一轮，不用等下一个心跳周期
-	go n.broadcastAppendEntries()
+	// 唤醒心跳循环，不用等下一个周期
+	n.signalReplicate()
 
 	return nil
 }
