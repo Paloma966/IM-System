@@ -55,6 +55,9 @@ func (n *Node) setTerm(term uint64) {
 	n.role = Follower
 	n.leaderID = ""
 	_ = SaveMeta(n.cfg.DataDir, n.currentTerm, n.votedFor)
+	// 转为 Follower 必须重启选举定时器（Raft §5.2）：否则本节点旧定时器
+	// 可能已消耗，此后永远不自发竞选，影响集群可用性。
+	n.resetElectionTimerLocked()
 }
 
 // ============================================================
@@ -64,6 +67,13 @@ func (n *Node) setTerm(term uint64) {
 // resetElectionTimer 在选举定时器回调或 resetElectionTimerLocked 里调用，
 // 启动一个随机时长的定时器，到期后发起选举
 func (n *Node) scheduleElectionTimer() {
+	// 已停止的节点不再调度新定时器
+	select {
+	case <-n.stopCh:
+		return
+	default:
+	}
+
 	base := n.cfg.ElectionTimeout
 	jitter := time.Duration(rand.Int63n(int64(base)))
 	timeout := base + jitter
@@ -77,6 +87,13 @@ func (n *Node) scheduleElectionTimer() {
 
 	n.electionTimer = time.AfterFunc(timeout, func() {
 		n.mu.Lock()
+		select {
+		case <-n.stopCh:
+			// 节点已停止：不再发起选举
+			n.mu.Unlock()
+			return
+		default:
+		}
 		if epoch != n.electionEpoch {
 			n.mu.Unlock()
 			return
@@ -187,22 +204,26 @@ func (n *Node) becomeLeaderLocked() {
 // Start / Stop
 // ============================================================
 
-// Start 启动节点：进入 Follower，启动选举定时器与应用循环
+// Start 启动节点：进入 Follower，启动选举定时器
 func (n *Node) Start() {
 	n.mu.Lock()
 	n.role = Follower
 	n.mu.Unlock()
 	go n.runElectionTimer()
-	go n.runApplyLoop()
 }
 
-// Stop 停止节点：关闭定时器并通知各循环退出
+// Stop 停止节点：关闭定时器并通知各循环退出。可安全地多次调用。
+// 先等 apply 循环退出，再关闭 applyCh（避免向已关闭通道发送 panic）。
 func (n *Node) Stop() {
-	n.mu.Lock()
-	n.role = Follower // 让 broadcastAppendEntries 循环看到 role!=Leader 自己退出
-	n.mu.Unlock()
-	close(n.stopCh)
-	if n.electionTimer != nil {
-		n.electionTimer.Stop()
-	}
+	n.stopOnce.Do(func() {
+		n.mu.Lock()
+		n.role = Follower // 让心跳循环看到 role!=Leader 自己退出
+		n.mu.Unlock()
+		close(n.stopCh)
+		if n.electionTimer != nil {
+			n.electionTimer.Stop()
+		}
+		<-n.applyLoopDone
+		close(n.applyCh)
+	})
 }

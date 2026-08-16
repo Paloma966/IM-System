@@ -285,7 +285,7 @@ func main() {
 		if node.IsLeader() {
 			payload, _ := json.Marshal(msg)
 			cmd := raft.Command{Type: "message", Payload: payload}
-			if err := node.Submit(cmd); err != nil {
+			if _, err := node.Submit(cmd); err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
 			}

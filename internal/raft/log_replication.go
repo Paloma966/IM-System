@@ -86,9 +86,21 @@ func (n *Node) broadcastAppendEntries() {
 	}
 }
 
-// runHeartbeatLoop Leader 周期性广播（心跳 + 日志复制）
+// runHeartbeatLoop Leader 周期广播（心跳 + 日志复制）。
+// 周期由心跳间隔决定；Submit 通过 replicateSignal 立即唤醒一轮，
+// 突发提交合并为一次广播（不再每条消息都起一轮 goroutine）。
 func (n *Node) runHeartbeatLoop() {
+	ticker := time.NewTicker(n.cfg.HeartbeatInterval)
+	defer ticker.Stop()
+
 	for {
+		select {
+		case <-ticker.C:
+		case <-n.replicateSignal:
+		case <-n.stopCh:
+			return
+		}
+
 		n.mu.Lock()
 		if n.role != Leader {
 			n.mu.Unlock()
@@ -97,8 +109,6 @@ func (n *Node) runHeartbeatLoop() {
 		n.mu.Unlock()
 
 		n.broadcastAppendEntries()
-
-		time.Sleep(n.cfg.HeartbeatInterval)
 	}
 }
 
@@ -209,6 +219,8 @@ func (n *Node) collectCommitted() []Command {
 
 // runApplyLoop 等信号，把已提交命令推给状态机（applyCh）
 func (n *Node) runApplyLoop() {
+	defer close(n.applyLoopDone)
+
 	for {
 		select {
 		case <-n.stopCh:

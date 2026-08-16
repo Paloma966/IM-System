@@ -109,7 +109,7 @@ func TestBurstReplication(t *testing.T) {
 	const total = 10
 	for i := 1; i <= total; i++ {
 		cmd := Command{Type: "message", Payload: fmt.Appendf([]byte(`{"seq":`), "%d}", i)}
-		if err := leader.Submit(cmd); err != nil {
+		if _, err := leader.Submit(cmd); err != nil {
 			t.Fatalf("Submit #%d: %v", i, err)
 		}
 	}
@@ -162,8 +162,12 @@ func TestReplication(t *testing.T) {
 	leader := waitForLeader(t, nodes)
 
 	cmd := Command{Type: "message", Payload: []byte(`{"text":"hi"}`)}
-	if err := leader.Submit(cmd); err != nil {
+	index, err := leader.Submit(cmd)
+	if err != nil {
 		t.Fatalf("Submit: %v", err)
+	}
+	if err := leader.WaitCommitted(index, 5*time.Second); err != nil {
+		t.Fatalf("WaitCommitted: %v", err)
 	}
 
 	// 1) leader 的 applyCh 最终收到这条命令
