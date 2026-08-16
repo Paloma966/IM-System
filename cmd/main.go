@@ -2,15 +2,19 @@ package main
 
 import (
 	"bytes"
+	crand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
@@ -23,13 +27,68 @@ type ConnectRequest struct {
 	Name string `json:"name"`
 }
 
-// users 在线用户集合；subscribers 是每个用户的 SSE 推送通道。
-// 这两个是"本节点本地"的状态（在线列表不做 Raft 复制，聊天内容才复制）。
+// 会话与在线状态（"本节点本地"状态：在线列表不做 Raft 复制，聊天内容才复制）。
+// sessions 是 token → name 的映射；nameToken 记录每个名字当前的有效 token，
+// 同名重连时旧 token 立即失效（last-connect-wins，防止旧连接继续冒充）。
 var (
 	users       = make(map[string]bool)
 	subscribers = make(map[string]chan string)
+	sessions    = make(map[string]string)
+	nameToken   = make(map[string]string)
 	mu          sync.RWMutex
 )
+
+const (
+	// maxNameLen 用户名最大长度（rune）
+	maxNameLen = 32
+	// maxTextLen 单条消息文本最大长度（rune）
+	maxTextLen = 4096
+	// historyDefaultLimit 历史接口默认返回条数上限
+	historyDefaultLimit = 500
+	// historyMaxLimit 历史接口允许的最大条数
+	historyMaxLimit = 1000
+)
+
+// requireAuth 校验请求携带的会话令牌，返回对应的用户名。
+// 令牌可从 Authorization: Bearer <t>、X-Auth-Token 头或 ?token= 查询参数获取
+// （EventSource 无法自定义请求头，只能走查询参数）。
+func requireAuth(c *gin.Context) (string, bool) {
+	token := bearerToken(c)
+	if token == "" {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing token"})
+		return "", false
+	}
+	mu.RLock()
+	name, ok := sessions[token]
+	mu.RUnlock()
+	if !ok || name == "" {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+		return "", false
+	}
+	return name, true
+}
+
+// bearerToken 从请求中提取会话令牌
+func bearerToken(c *gin.Context) string {
+	if auth := c.GetHeader("Authorization"); auth != "" {
+		if t, ok := strings.CutPrefix(auth, "Bearer "); ok {
+			return strings.TrimSpace(t)
+		}
+	}
+	if t := c.GetHeader("X-Auth-Token"); t != "" {
+		return t
+	}
+	return c.Query("token")
+}
+
+// randomToken 生成 32 字节的随机会话令牌（hex 编码）
+func randomToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := crand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
 
 // main 装配 Raft 节点、聊天状态机与 HTTP 服务
 func main() {
@@ -135,18 +194,28 @@ func main() {
 		c.File("./web/index.html")
 	})
 
-	// POST /api/messages 发消息：Leader 直接提交到 Raft 日志，Follower 转发给 Leader
+	// POST /api/messages 发消息：Leader 直接提交到 Raft 日志，Follower 转发给 Leader。
+	// 发送者身份取自会话令牌，客户端提交的 from 字段被忽略（防冒充）。
 	r.POST("/api/messages", func(c *gin.Context) {
+		name, ok := requireAuth(c)
+		if !ok {
+			return
+		}
+
 		var req chat.Message
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		if utf8.RuneCountInString(req.Text) > maxTextLen {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "text too long"})
+			return
+		}
 
-		// 服务端补全 ID 和时间戳（单点生成，避免客户端伪造重复 ID）
+		// 服务端补全 ID 和时间戳，并强制使用会话身份作为发送者
 		msg := chat.Message{
 			ID:   fmt.Sprintf("%d", time.Now().UnixNano()),
-			From: req.From,
+			From: name,
 			To:   req.To,
 			Text: req.Text,
 			Ts:   time.Now().Unix(),
@@ -169,12 +238,27 @@ func main() {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no leader known yet, retry later"})
 			return
 		}
-		forwardToLeader(c, req, leader)
+		forwardToLeader(c, msg, leader, bearerToken(c))
 	})
 
-	// GET /api/messages/history 返回状态机历史（任何节点都一致）
+	// GET /api/messages/history 返回状态机历史（任何节点都一致）。
+	// 只返回请求者可见的消息（群聊 + 自己参与的私聊），?limit 控制条数。
 	r.GET("/api/messages/history", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"messages": state.History()})
+		name, ok := requireAuth(c)
+		if !ok {
+			return
+		}
+
+		limit := historyDefaultLimit
+		if v, err := strconv.Atoi(c.DefaultQuery("limit", "")); err == nil && v > 0 {
+			limit = min(v, historyMaxLimit)
+		}
+
+		visible := chat.FilterVisible(state.History(), name)
+		if len(visible) > limit {
+			visible = visible[len(visible)-limit:]
+		}
+		c.JSON(http.StatusOK, gin.H{"messages": visible})
 	})
 
 	r.POST("/connect", func(c *gin.Context) {
@@ -184,25 +268,70 @@ func main() {
 			return
 		}
 
-		mu.Lock()
-		defer mu.Unlock()
-		users[req.Name] = true
-		subscribers[req.Name] = make(chan string, 10)
+		// 名字校验：非空、长度限制、禁止控制字符
+		name := strings.TrimSpace(req.Name)
+		if name == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "name required"})
+			return
+		}
+		if utf8.RuneCountInString(name) > maxNameLen {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "name too long"})
+			return
+		}
+		if strings.ContainsAny(name, "\x00\r\n") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "name contains invalid characters"})
+			return
+		}
 
-		c.JSON(http.StatusOK, gin.H{"ok": true})
+		token, err := randomToken()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to issue token"})
+			return
+		}
+
+		mu.Lock()
+		// 同名重连：旧 token 立即失效（last-connect-wins）
+		if old, existed := nameToken[name]; existed {
+			delete(sessions, old)
+		}
+		sessions[token] = name
+		nameToken[name] = token
+		users[name] = true
+		subscribers[name] = make(chan string, 10)
+		mu.Unlock()
+
+		c.JSON(http.StatusOK, gin.H{"ok": true, "token": token})
 	})
 
 	r.GET("/users", func(c *gin.Context) {
-		// 内部扇出专用：只返回本节点在线用户，避免 /users 递归调用自己
+		// 内部扇出专用：只返回本节点在线用户，避免 /users 递归调用自己。
+		// 仅集群内节点（持有共享密钥）可调用。
 		if c.Query("local") == "1" {
+			if *secret == "" || c.GetHeader("X-Node-Secret") != *secret {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+				return
+			}
 			c.JSON(http.StatusOK, gin.H{"users": localUsers()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"users": globalUsers(peers)})
+		if _, ok := requireAuth(c); !ok {
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"users": globalUsers(peers, *secret)})
 	})
 
 	r.GET("/stream/:name", func(c *gin.Context) {
 		name := c.Param("name")
+
+		// 订阅者必须持有该名字的会话令牌（EventSource 走 ?token=）
+		token := c.Query("token")
+		mu.RLock()
+		owner, ok := sessions[token]
+		mu.RUnlock()
+		if token == "" || !ok || owner != name {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+			return
+		}
 
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
@@ -272,14 +401,25 @@ func pushLocal(msg chat.Message) {
 	}
 }
 
-// forwardToLeader 把消息转发给 Leader 的 HTTP 接口（Follower 上的写请求）
-func forwardToLeader(c *gin.Context, msg chat.Message, leader string) {
+// forwardToLeader 把消息转发给 Leader 的 HTTP 接口（Follower 上的写请求）。
+// 带上发送者的会话令牌，Leader 端重新校验身份。
+func forwardToLeader(c *gin.Context, msg chat.Message, leader, token string) {
 	data, _ := json.Marshal(msg)
-	resp, err := http.Post(
+	req, err := http.NewRequest(
+		http.MethodPost,
 		"http://"+leader+"/api/messages",
-		"application/json",
 		bytes.NewReader(data),
 	)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to build forward request: " + err.Error()})
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to reach leader: " + err.Error()})
 		return

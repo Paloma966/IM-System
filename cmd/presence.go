@@ -13,6 +13,9 @@ import (
 // peer 挂掉时把 /users 整个拖慢；前端每 3 秒轮询一次，量很小。
 const peerUserTimeout = 500 * time.Millisecond
 
+// peerClient 复用的扇出客户端（不再每次请求新建 http.Client）
+var peerClient = &http.Client{Timeout: peerUserTimeout}
+
 // localUsers 返回本节点在线用户（已排序）。数据源是本地 users map。
 func localUsers() []string {
 	mu.RLock()
@@ -45,20 +48,27 @@ func mergeUsers(sets ...[]string) []string {
 
 // globalUsers 聚合全局在线用户：本地 + 各 peer 的本地集合。
 // 任一 peer 失败/超时就跳过（优雅降级），不会拖垮整个 /users。
-func globalUsers(peers []raft.Peer) []string {
-	client := &http.Client{Timeout: peerUserTimeout}
-
+// secret 是集群共享密钥，peer 的 ?local=1 接口用它验证来源。
+func globalUsers(peers []raft.Peer, secret string) []string {
 	sets := [][]string{localUsers()}
 	for _, peer := range peers {
-		sets = append(sets, fetchPeerUsers(client, peer))
+		sets = append(sets, fetchPeerUsers(peerClient, peer, secret))
 	}
 	return mergeUsers(sets...)
 }
 
 // fetchPeerUsers 向 peer 拉取其本地在线用户；失败/超时返回 nil。
-// 走 ?local=1，只取该节点的本地集合，避免 /users 递归。
-func fetchPeerUsers(client *http.Client, peer raft.Peer) []string {
-	resp, err := client.Get("http://" + peer.HTTPAddr + "/users?local=1")
+// 走 ?local=1，只取该节点的本地集合，避免 /users 递归；带共享密钥认证。
+func fetchPeerUsers(client *http.Client, peer raft.Peer, secret string) []string {
+	req, err := http.NewRequest(http.MethodGet, "http://"+peer.HTTPAddr+"/users?local=1", nil)
+	if err != nil {
+		return nil
+	}
+	if secret != "" {
+		req.Header.Set("X-Node-Secret", secret)
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil
 	}

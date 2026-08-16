@@ -4,13 +4,22 @@
 // ---------- 状态 ----------
 const state = {
   name: '',
+  token: '',
   users: [],     // 在线用户列表
-  messages: [],  // 全部消息（群聊 + 私聊）
+  messages: [],  // 全部可见消息（群聊 + 自己参与的私聊）
   to: '',        // 当前聊天对象；'' = 群聊
 };
 
 let eventSource = null;
 let userPollTimer = null;
+
+// 带会话令牌的请求头（服务端以此校验身份）
+function authHeaders() {
+  return {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${state.token}`,
+  };
+}
 
 // ---------- DOM 引用 ----------
 const loginScreen = document.getElementById('login-screen');
@@ -107,29 +116,35 @@ async function connect() {
   if (!name) return;
   state.name = name;
 
-  await fetch('/connect', {
+  const res = await fetch('/connect', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
   });
+  if (!res.ok) {
+    alert('登录失败，请重试');
+    return;
+  }
+  const login = await res.json();
+  state.token = login.token;
 
   // 连接后加载一次历史；后续新消息走 SSE
   try {
-    const res = await fetch('/api/messages/history');
-    const data = await res.json();
-    state.messages = (data.messages || []).map((m) => ({ from: m.from, to: m.to, text: m.text, id: m.id }));
+    const hres = await fetch('/api/messages/history', { headers: authHeaders() });
+    const data = await hres.json();
+    state.messages = (data.messages || []).map((m) => ({ from: m.from, to: m.to, text: m.text, id: m.id, ts: m.ts }));
   } catch {
     // 历史不可用，从空开始
   }
 
-  // SSE 实时订阅（EventSource 断线会自动重连）
-  eventSource = new EventSource(`/stream/${encodeURIComponent(name)}`);
+  // SSE 实时订阅（EventSource 断线会自动重连；token 走查询参数）
+  eventSource = new EventSource(`/stream/${encodeURIComponent(name)}?token=${encodeURIComponent(state.token)}`);
   eventSource.addEventListener('message', (e) => {
     try {
       const evt = JSON.parse(e.data);
       state.messages = [
         ...state.messages,
-        { from: evt.from, to: evt.to, text: evt.text, id: evt.id || Date.now() + Math.random() },
+        { from: evt.from, to: evt.to, text: evt.text, id: evt.id, ts: evt.ts },
       ];
       renderMessages();
     } catch {
@@ -155,7 +170,7 @@ async function send() {
   try {
     await fetch('/api/messages', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders(),
       body: JSON.stringify(payload),
     });
   } catch {
@@ -165,7 +180,7 @@ async function send() {
 
 async function fetchUsers() {
   try {
-    const res = await fetch('/users');
+    const res = await fetch('/users', { headers: authHeaders() });
     const data = await res.json();
     state.users = data.users || [];
     renderUsers();

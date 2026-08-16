@@ -64,3 +64,24 @@ func TestHistoryIsCopy(t *testing.T) {
 		t.Fatal("History() should return a copy, not the internal slice")
 	}
 }
+
+func TestFilterVisible(t *testing.T) {
+	msgs := []Message{
+		{ID: "1", From: "alice", To: "all", Text: "group"},
+		{ID: "2", From: "bob", To: "alice", Text: "private to alice"},
+		{ID: "3", From: "bob", To: "carol", Text: "private bob-carol"},
+		{ID: "4", From: "carol", To: "", Text: "legacy group"},
+	}
+
+	// alice 可见：群聊 + 自己参与的私聊
+	got := FilterVisible(msgs, "alice")
+	if len(got) != 3 || got[0].ID != "1" || got[1].ID != "2" || got[2].ID != "4" {
+		t.Fatalf("alice visible = %+v", got)
+	}
+
+	// carol 可见：群聊 + 自己参与的私聊
+	got = FilterVisible(msgs, "carol")
+	if len(got) != 3 || got[0].ID != "1" || got[1].ID != "3" || got[2].ID != "4" {
+		t.Fatalf("carol visible = %+v", got)
+	}
+}

@@ -43,3 +43,15 @@ func (s *State) History() []Message {
 	defer s.mu.RUnlock()
 	return append([]Message(nil), s.messages...)
 }
+
+// FilterVisible 返回 user 可见的消息：群聊（to 为 "" 或 "all"）全员可见，
+// 私聊仅发送方与接收方可见。历史接口用它做按身份的读过滤。
+func FilterVisible(messages []Message, user string) []Message {
+	out := make([]Message, 0, len(messages))
+	for _, m := range messages {
+		if m.To == "" || m.To == "all" || m.From == user || m.To == user {
+			out = append(out, m)
+		}
+	}
+	return out
+}
